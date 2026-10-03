@@ -62,8 +62,16 @@ test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron
     await page.locator('[name=old]').fill('diary-test-123'); await page.locator('[name=next]').fill('diary-test-456');
     await page.locator('[name=confirmation]').fill('diary-test-456'); await page.locator('#modalConfirm').click();
     await expect(page.locator('#toast')).toHaveText('操作完成');
-    await page.locator('#settings').click(); await page.locator('[name=locale]').selectOption('en-US'); await page.locator('#modalConfirm').click();
+    await page.locator('#settings').click(); await page.locator('.settings-tabs button[data-tab="lang"]').click(); await page.locator('#cfgLocale').selectOption('en-US');
     await expect(page.locator('#save')).toHaveText('Save');
+    await page.locator('#settingsClose').click(); await page.locator('#campusMode').click();
+    await expect(page.locator('#campusWorkspace')).toBeVisible();
+    await page.locator('#campusQuestion').fill('宿舍水管坏了，需要报修'); await page.locator('#campusMatch').click();
+    await expect(page.locator('.service-card')).toHaveCount(1); await expect(page.locator('.service-card strong')).toHaveText('宿舍报修');
+    await page.locator('.service-card').click(); await page.locator('.case-actions .primary').click();
+    await expect(page.locator('#caseList .case-card')).toHaveCount(1); await expect(page.locator('.route-row')).toHaveCount(4);
+    await page.locator('.case-actions .primary').click(); await expect(page.locator('.route-row.done')).toHaveCount(1);
+    await page.locator('#diaryMode').click();
     await page.locator('#theme').click(); await expect(page.locator('body')).toHaveClass('dark');
     await page.locator('#more').click(); await page.locator('#delete').click(); await page.locator('#modalConfirm').click();
     await expect(page.locator('.entry-card')).toHaveCount(0);

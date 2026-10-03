@@ -38,7 +38,8 @@ export async function sourceArchive() {
   end.writeUInt32LE(directorySize, 12); end.writeUInt32LE(offset, 16);
   const archive = Buffer.concat([...chunks, ...directory, end]);
   await mkdir('../releases', { recursive: true });
-  await writeFile('../releases/Diary-0.2.0-Source.zip', archive);
+  const { version } = JSON.parse(await readFile('package.json', 'utf8'));
+  await writeFile(`../releases/Diary-${version}-Source.zip`, archive);
   await writeFile('dist/web/Diary-source.zip', archive);
   await writeFile('dist/web/LICENSE.txt', await readFile('LICENSE.md'));
 }

@@ -35,7 +35,7 @@ const rows = {
   done: ['操作完成', '操作完成', 'Done', '完了', '완료'],
   characters: ['字符', '字元', 'characters', '文字', '글자'],
   storage: ['存储位置', '儲存位置', 'Storage location', '保存先', '저장 위치'],
-  about: ['本地 Markdown 日记 · 版本 0.2.0\nAGPL-3.0 · 无云同步', '本機 Markdown 日記 · 版本 0.2.0\nAGPL-3.0 · 無雲端同步', 'Local Markdown diary · Version 0.2.0\nAGPL-3.0 · No cloud sync', 'ローカル Markdown 日記 · バージョン 0.2.0\nAGPL-3.0 · クラウド同期なし', '로컬 Markdown 일기 · 버전 0.2.0\nAGPL-3.0 · 클라우드 동기화 없음'],
+  about: ['日记与校园办事 · 版本 0.2.1\nAGPL-3.0 · 数据仅存本机', '日記與校園辦事 · 版本 0.2.1\nAGPL-3.0 · 資料僅存本機', 'Diary & campus services · Version 0.2.1\nAGPL-3.0 · Local data', '日記とキャンパス手続き · バージョン 0.2.1', '일기 및 캠퍼스 업무 · 버전 0.2.1'],
   importHint: ['导入的副本将保留原文件的加密状态。', '匯入的副本將保留原檔案的加密狀態。', 'The imported copy keeps its encryption state.', 'コピーは元の暗号化状態を保ちます。', '가져온 사본은 원래 암호화 상태를 유지합니다。'],
   // v0.2: AI, accounts, profile, media, batch
   settingsAi: ['AI 模型', 'AI 模型', 'AI model', 'AI モデル', 'AI 모델'],
@@ -92,6 +92,16 @@ const rows = {
   oauthTip: ['请在外部浏览器完成授权后，将地址栏中的 code 粘贴回来。', '請在外部瀏覽器完成授權後，將網址列中的 code 貼回。', 'Finish authorization in your browser, then paste the code from the address bar.', '外部ブラウザで認可後、アドレスバーの code を貼り付けてください。', '외부 브라우저에서 인가 후 주소창의 code 를 붙여넣으세요。'],
   language: ['语言', '語言', 'Language', '言語', '언어'],
   password: ['密码', '密碼', 'Passcode', 'パスコード', '암호'],
+  // v0.2.1: campus affairs mode
+  diaryMode: ['日记模式', '日記模式', 'Diary', '日記', '일기'], campusMode: ['校园办事', '校園辦事', 'Campus', 'キャンパス', '캠퍼스'],
+  campusStart: ['发起新事项', '發起新事項', 'Start a request', '手続きを開始', '업무 시작'], campusSearch: ['搜索我的事项', '搜尋我的事項', 'Search requests', '手続きを検索', '업무 검색'],
+  myCases: ['我的办事', '我的辦事', 'MY REQUESTS', '申請一覧', '내 업무'], campusEyebrow: ['校园事务智能体', '校園事務智能體', 'CAMPUS AFFAIRS AGENT', 'キャンパス手続き', '캠퍼스 업무 에이전트'],
+  campusTitle: ['一站式校园办事', '一站式校園辦事', 'Campus services, in one place', '学内手続きを一か所で', '한 곳에서 캠퍼스 업무'],
+  campusIntro: ['描述你要办的事，系统会识别事项、自动填表、生成材料清单，并按部门跟踪进度。', '描述你要辦的事，系統會識別事項、自動填表、產生材料清單並追蹤進度。', 'Describe what you need. The app matches a service, fills forms, builds a checklist, and tracks routing.', '内容から手続きを判断し、フォーム、書類、進捗を管理します。', '업무를 설명하면 양식, 서류, 진행 상황을 관리합니다.'],
+  campusQuestion: ['例如：我下周生病要请三天假，需要怎么申请？', '例如：我下週生病要請三天假，需要怎麼申請？', 'What campus task do you need help with?', '必要な手続きを入力', '필요한 캠퍼스 업무를 입력'], smartMatch: ['智能判断', '智慧判斷', 'Match service', '手続きを判断', '업무 판단'],
+  campusAdvice: ['支持请假、奖助学金、宿舍报修、转专业、成绩证明和实习手续。', '支援請假、獎助學金、宿舍報修、轉專業、成績證明和實習手續。', 'Leave, scholarships, dorm repairs, major transfers, transcripts, and internships.', '休暇、奨学金、寮修理、転科、証明書、実習に対応。', '휴가, 장학금, 기숙사 수리, 전공 변경, 성적표, 인턴십 지원.'],
+  studentProfile: ['学生身份', '學生身分', 'Student profile', '学生情報', '학생 정보'], profilePrivacy: ['用于自动填写申请表，仅保存在本机。', '用於自動填寫申請表，僅儲存於本機。', 'Used to auto-fill forms and stored only on this device.', '自動入力用。端末内にのみ保存されます。', '자동 입력에 사용되며 이 기기에만 저장됩니다.'],
+  realName: ['姓名', '姓名', 'Name', '氏名', '이름'], studentId: ['学号', '學號', 'Student ID', '学籍番号', '학번'], school: ['学校', '學校', 'School', '学校', '학교'], college: ['学院', '學院', 'College', '学部', '단과대학'], major: ['专业', '專業', 'Major', '専攻', '전공'], grade: ['年级', '年級', 'Grade', '学年', '학년'], phone: ['手机', '手機', 'Phone', '電話', '전화'], email: ['邮箱', '信箱', 'Email', 'メール', '이메일'], saveProfile: ['保存身份信息', '儲存身分資訊', 'Save profile', '保存', '저장'],
 } satisfies Record<string, [string, string, string, string, string]>;
 export const locale = new LocaleManager(localStorage.getItem('diary.locale') || 'zh-CN');
 export function t(key: string): string {

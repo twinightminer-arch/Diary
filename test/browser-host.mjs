@@ -31,6 +31,8 @@ export async function launchBrowserHost(directory) {
       case 'decrypt': return engine.decryptEntry(id, passcode);
       case 'changePasscode': return engine.changeEntryPasscode(id, passcode, next, confirmation);
       case 'info': return { location: directory };
+      case 'config:get': return { activeProvider: 'openai', providers: [{ id: 'openai', baseUrl: '', model: '', hasKey: false }], profile: { username: '', avatar: null, signature: '' }, media: { background: null, bgm: null }, hasLocalAccount: false, oauthClients: {} };
+      case 'media:list': return [];
       default: throw Error('Unsupported test action');
     }
   });

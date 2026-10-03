@@ -4,6 +4,8 @@ import type { Entry, EntrySummary, MarkdownDocument } from './api.ts';
 import { locale, t } from './copy.ts';
 import { decryptContent, isEncrypted } from '../security/encryption.ts';
 import { parseMarkdown } from '../storage/markdown.ts';
+import { advanceCampusCase, applicationText, campusServices, createCampusCase, matchCampusService } from './campus.ts';
+import type { CampusCase, CampusProfile, CampusService } from './campus.ts';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const title = $<HTMLInputElement>('title'), editor = $<HTMLTextAreaElement>('editor');
@@ -12,6 +14,8 @@ let entries: (EntrySummary & { title: string; snippet: string })[] = [];
 let toastTimer: ReturnType<typeof setTimeout>;
 let unlocked = true;
 let selected = new Set<string>();
+let appMode: 'diary' | 'campus' = localStorage.getItem('diary.mode') === 'campus' ? 'campus' : 'diary';
+let activeCaseId: string | null = null;
 type Field = { name: string; label: string; type?: string; options?: [string, string][] };
 function modal(heading: string, message = '', fields: Field[] = []): Promise<Record<string, string> | null> {
   const dialog = $<HTMLDialogElement>('modal');
@@ -66,7 +70,7 @@ function translate() {
   document.querySelectorAll<HTMLElement>('[data-i]').forEach(element => { element.textContent = t(element.dataset.i!); });
   document.querySelectorAll<HTMLInputElement>('[data-placeholder]').forEach(element => { element.placeholder = t(element.dataset.placeholder!); });
   $('breadcrumbDate').textContent = locale.date(Date.now(), { month: 'long', day: 'numeric', weekday: 'long' });
-  renderList(); status();
+  renderList(); renderServices(campusServices); renderCaseList(); status();
 }
 function status() {
   $('saveState').textContent = t(dirty ? 'unsaved' : 'saved');
@@ -240,6 +244,11 @@ async function loadConfig() {
   $('lockNow').hidden = !cfg.hasLocalAccount;
   $<HTMLInputElement>('googleClientId').value = cfg.oauthClients.google ?? '';
   $<HTMLInputElement>('microsoftClientId').value = cfg.oauthClients.microsoft ?? '';
+  const student = campusProfile();
+  $<HTMLInputElement>('studentName').value = student.name; $<HTMLInputElement>('studentId').value = student.studentId;
+  $<HTMLInputElement>('studentSchool').value = student.school; $<HTMLInputElement>('studentCollege').value = student.college;
+  $<HTMLInputElement>('studentMajor').value = student.major; $<HTMLInputElement>('studentGrade').value = student.grade;
+  $<HTMLInputElement>('studentPhone').value = student.phone; $<HTMLInputElement>('studentEmail').value = student.email;
   if (cfg.profile.avatar) {
     const url = await call<string>({ op: 'media:data', id: cfg.profile.avatar });
     const img = $<HTMLImageElement>('profileAvatarPreview'); img.src = url; img.hidden = false;
@@ -441,6 +450,96 @@ $('webWeather').onclick = action(async () => {
   insertText(`天气：${w.description}，${w.tempC}°C`);
 });
 
+// ---------- Campus affairs mode ----------
+const emptyProfile = (): CampusProfile => ({ name: '', studentId: '', school: '', college: '', major: '', grade: '', phone: '', email: '' });
+function campusProfile(): CampusProfile {
+  try { return { ...emptyProfile(), ...JSON.parse(localStorage.getItem('diary.campus.profile') || '{}') as CampusProfile }; }
+  catch { return emptyProfile(); }
+}
+function campusCases(): CampusCase[] {
+  try { const value = JSON.parse(localStorage.getItem('diary.campus.cases') || '[]'); return Array.isArray(value) ? value as CampusCase[] : []; }
+  catch { return []; }
+}
+function saveCampusCases(items: CampusCase[]) { localStorage.setItem('diary.campus.cases', JSON.stringify(items)); }
+function textElement(tag: string, text: string, className = ''): HTMLElement {
+  const element = document.createElement(tag); element.textContent = text; element.className = className; return element;
+}
+function setMode(mode: 'diary' | 'campus') {
+  appMode = mode; localStorage.setItem('diary.mode', mode);
+  $('diaryMode').classList.toggle('active', mode === 'diary'); $('campusMode').classList.toggle('active', mode === 'campus');
+  $('diarySidebar').hidden = mode !== 'diary'; $('campusSidebar').hidden = mode !== 'campus'; $('campusWorkspace').hidden = mode !== 'campus';
+  if (mode === 'campus') { $('empty').hidden = true; $('workspace').hidden = true; $('breadcrumbDate').textContent = t('campusMode'); renderServices(campusServices); renderCaseList(); }
+  else { $('campusWorkspace').hidden = true; $('breadcrumbDate').textContent = locale.date(Date.now(), { month: 'long', day: 'numeric', weekday: 'long' }); if (current) $('workspace').hidden = false; else $('empty').hidden = false; }
+  document.body.classList.remove('sidebar-open');
+}
+function renderServices(services: CampusService[]) {
+  const grid = $('serviceGrid'); if (!grid) return; grid.replaceChildren();
+  for (const service of services) {
+    const button = document.createElement('button'); button.className = 'service-card';
+    button.append(textElement('span', service.icon, 'service-icon'), textElement('strong', service.title), textElement('p', service.description), textElement('small', `办理部门：${service.department}`));
+    button.onclick = () => renderServiceForm(service); grid.append(button);
+  }
+  $('campusAdvice').textContent = services.length ? t('campusAdvice') : '暂未识别到匹配事项，请换一种说法或从下方分类选择。';
+}
+function formInput(labelText: string, value = ''): HTMLLabelElement {
+  const label = document.createElement('label'); label.textContent = labelText;
+  const input = document.createElement(labelText.includes('原因') || labelText.includes('描述') || labelText.includes('理由') ? 'textarea' : 'input') as HTMLInputElement | HTMLTextAreaElement;
+  input.name = labelText; input.value = value; input.autocomplete = 'off'; label.append(input); return label;
+}
+function renderServiceForm(service: CampusService) {
+  activeCaseId = null; const detail = $('caseDetail'); detail.replaceChildren(); detail.hidden = false;
+  detail.append(textElement('h2', `${service.icon} ${service.title}`), textElement('p', `系统已判断办理部门：${service.department}`, 'case-meta'));
+  const form = document.createElement('div'); form.className = 'case-form';
+  for (const field of service.fields) form.append(formInput(field));
+  detail.append(textElement('h3', '申请信息（身份字段将自动填写）'), form, textElement('h3', '预计材料清单'));
+  const checklist = document.createElement('div'); checklist.className = 'check-list';
+  for (const name of service.materials) checklist.append(textElement('div', `□ ${name}`, 'check-row'));
+  detail.append(checklist, textElement('h3', '跨部门流程'));
+  const route = document.createElement('div'); route.className = 'route-list';
+  service.steps.forEach((step, index) => route.append(textElement('div', `${index + 1}. ${step}`, 'route-row'))); detail.append(route);
+  const actions = document.createElement('div'); actions.className = 'case-actions'; const create = textElement('button', '生成申请表并开始追踪', 'primary') as HTMLButtonElement;
+  create.onclick = () => {
+    const values = Object.fromEntries([...form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input,textarea')].map(input => [input.name, input.value.trim()]));
+    const item = createCampusCase(service, campusProfile(), values); const items = campusCases(); items.unshift(item); saveCampusCases(items); activeCaseId = item.id; renderCampusCase(item); renderCaseList(); toast('已生成申请表与办理清单');
+  };
+  actions.append(create); detail.append(actions); detail.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function renderCampusCase(item: CampusCase) {
+  const detail = $('caseDetail'); detail.replaceChildren(); detail.hidden = false;
+  detail.append(textElement('h2', item.title)); const meta = document.createElement('p'); meta.className = 'case-meta';
+  meta.append(textElement('span', ({ draft: '待提交', submitted: '已提交', processing: '办理中', completed: '已完成' } as const)[item.status], 'status-pill'), document.createTextNode(`　流转：${item.department}`)); detail.append(meta);
+  detail.append(textElement('h3', '自动填写的申请信息')); const form = document.createElement('div'); form.className = 'case-form';
+  for (const [key, value] of Object.entries(item.fields)) form.append(formInput(key, value)); detail.append(form);
+  detail.append(textElement('h3', '材料清单')); const checks = document.createElement('div'); checks.className = 'check-list';
+  item.materials.forEach((material, index) => { const label = document.createElement('label'); label.className = 'check-row'; const input = document.createElement('input'); input.type = 'checkbox'; input.checked = material.checked; input.onchange = () => updateCampusCase(item.id, value => { value.materials[index]!.checked = input.checked; return value; }); label.append(input, document.createTextNode(material.name)); checks.append(label); }); detail.append(checks);
+  detail.append(textElement('h3', '部门流转与结果追踪')); const route = document.createElement('div'); route.className = 'route-list';
+  item.steps.forEach(step => { const row = document.createElement('div'); row.className = `route-row${step.done ? ' done' : ''}`; row.append(textElement('span', step.done ? '✓' : '', 'route-dot')); const words = document.createElement('div'); words.append(textElement('strong', step.label), textElement('small', step.department)); row.append(words); route.append(row); }); detail.append(route);
+  const actions = document.createElement('div'); actions.className = 'case-actions';
+  const save = textElement('button', '保存表单', 'text-button') as HTMLButtonElement; save.onclick = () => { const fields = Object.fromEntries([...form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input,textarea')].map(input => [input.name, input.value])); updateCampusCase(item.id, value => ({ ...value, fields })); toast('申请表已保存'); };
+  const copy = textElement('button', '复制申请表', 'text-button') as HTMLButtonElement; copy.onclick = action(async () => { await navigator.clipboard.writeText(applicationText(campusCases().find(value => value.id === item.id) || item)); toast('申请表已复制'); });
+  const next = textElement('button', item.status === 'draft' ? '提交并开始办理' : item.status === 'completed' ? '已办结' : '推进下一环节', 'primary') as HTMLButtonElement; next.disabled = item.status === 'completed'; next.onclick = () => updateCampusCase(item.id, advanceCampusCase, true);
+  actions.append(save, copy, next); detail.append(actions); detail.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+function updateCampusCase(id: string, update: (item: CampusCase) => CampusCase, rerender = false) {
+  const items = campusCases(); const index = items.findIndex(item => item.id === id); if (index < 0) return; items[index] = update(structuredClone(items[index]!)); saveCampusCases(items); renderCaseList(); if (rerender) renderCampusCase(items[index]!);
+}
+function renderCaseList() {
+  const list = $('caseList'); if (!list) return; list.replaceChildren(); const query = $<HTMLInputElement>('campusSearch')?.value.trim().toLocaleLowerCase() || '';
+  const items = campusCases().filter(item => `${item.title} ${item.department}`.toLocaleLowerCase().includes(query)); $('caseCount').textContent = String(campusCases().length);
+  for (const item of items) { const button = document.createElement('button'); button.className = `case-card${activeCaseId === item.id ? ' active' : ''}`; button.append(textElement('strong', item.title), textElement('small', `${item.department} · ${{ draft: '待提交', submitted: '已提交', processing: '办理中', completed: '已完成' }[item.status]}`)); button.onclick = () => { activeCaseId = item.id; renderCampusCase(item); renderCaseList(); document.body.classList.remove('sidebar-open'); }; list.append(button); }
+  if (!items.length) list.append(textElement('p', '暂无办事记录', 'no-entries'));
+}
+$('diaryMode').onclick = () => setMode('diary'); $('campusMode').onclick = () => setMode('campus');
+$('campusNew').onclick = () => { activeCaseId = null; $('caseDetail').hidden = true; renderServices(campusServices); };
+$('campusSearch').oninput = renderCaseList;
+$('campusMatch').onclick = () => renderServices(matchCampusService($<HTMLInputElement>('campusQuestion').value));
+$('campusQuestion').onkeydown = event => { if (event.key === 'Enter') $('campusMatch').click(); };
+$('campusProfile').onclick = action(async () => { await loadConfig(); $('settingsPanel').hidden = false; (document.querySelector<HTMLButtonElement>('.settings-tabs button[data-tab="campus"]'))?.click(); });
+$('studentSave').onclick = () => {
+  const profile: CampusProfile = { name: $<HTMLInputElement>('studentName').value.trim(), studentId: $<HTMLInputElement>('studentId').value.trim(), school: $<HTMLInputElement>('studentSchool').value.trim(), college: $<HTMLInputElement>('studentCollege').value.trim(), major: $<HTMLInputElement>('studentMajor').value.trim(), grade: $<HTMLInputElement>('studentGrade').value.trim(), phone: $<HTMLInputElement>('studentPhone').value.trim(), email: $<HTMLInputElement>('studentEmail').value.trim() };
+  localStorage.setItem('diary.campus.profile', JSON.stringify(profile)); toast('学生身份已保存到本机');
+};
+
 // ---------- Batch operations ----------
 $('batchEncrypt').onclick = action(async () => {
   if (!selected.size) return;
@@ -534,6 +633,7 @@ window.addEventListener('diary-back', () => {
 });
 document.body.classList.toggle('dark', localStorage.getItem('diary.dark') === 'true');
 translate();
+setMode(appMode);
 // Boot: load config (lock screen if a local account exists), then refresh.
 void action(async () => {
   const cfg = await call<{ hasLocalAccount: boolean }>({ op: 'config:get' });

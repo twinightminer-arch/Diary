@@ -1,6 +1,6 @@
 {
   "name": "diary",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "type": "module",
   "license": "AGPL-3.0-only",
@@ -23,6 +23,6 @@
     "typescript": "^5.9.3"
   },
   "main": "dist/desktop/main.js",
-  "description": "Private, local-first Markdown diary",
+  "description": "Local-first diary and campus affairs assistant",
   "author": "Diary contributors"
 }

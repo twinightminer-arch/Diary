@@ -24,7 +24,7 @@ $classes = @(Get-ChildItem (Join-Path $build 'classes') -Filter '*.class' -Recur
 Invoke-Checked (Join-Path $Java 'bin/java.exe') (@('-cp',(Join-Path $tools 'lib/d8.jar'),'com.android.tools.r8.D8','--lib',(Join-Path $platform 'android.jar'),'--min-api','26','--output',(Join-Path $build 'dex')) + $classes)
 Invoke-Checked (Join-Path $Java 'bin/jar.exe') @('--update','--file',(Join-Path $build 'base.apk'),'-C',(Join-Path $build 'dex'),'classes.dex')
 Invoke-Checked (Join-Path $tools 'zipalign.exe') @('-f','-p','4',(Join-Path $build 'base.apk'),(Join-Path $build 'aligned.apk'))
-$apk = Join-Path $release 'Diary-0.2.0-Android.apk'
+$apk = Join-Path $release 'Diary-0.2.1-Android.apk'
 Invoke-Checked (Join-Path $Java 'bin/java.exe') @('-jar',(Join-Path $tools 'lib/apksigner.jar'),'sign','--ks',$Keystore,'--ks-key-alias','diary','--ks-pass',"file:$PasswordFile",'--out',$apk,(Join-Path $build 'aligned.apk'))
 Invoke-Checked (Join-Path $Java 'bin/java.exe') @('-jar',(Join-Path $tools 'lib/apksigner.jar'),'verify','--verbose','--print-certs',$apk)
 Invoke-Checked (Join-Path $tools 'aapt2.exe') @('dump','badging',$apk)
