@@ -6,10 +6,15 @@ $build = 'android-build'
 $release = '../releases'
 $platform = (Get-ChildItem (Join-Path $Sdk 'platforms') -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'android.jar') } | Select-Object -First 1).FullName
 $tools = (Get-ChildItem (Join-Path $Sdk 'build-tools') -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'aapt2.exe') } | Select-Object -First 1).FullName
-$platform = [IO.Path]::GetRelativePath($root, $platform)
-$tools = [IO.Path]::GetRelativePath($root, $tools)
-$root = '.'
-function Invoke-Checked([string]$Executable, [string[]]$Arguments) { & $Executable @Arguments; if ($LASTEXITCODE -ne 0) { throw "Build command failed: $Executable ($LASTEXITCODE)" } }
+# Native tools (javac, d8) write warnings to stderr. With $ErrorActionPreference
+# = 'Stop' PowerShell would treat those as terminating errors, so relax it
+# around the call and rely on $LASTEXITCODE to detect real failures.
+function Invoke-Checked([string]$Executable, [string[]]$Arguments) {
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { & $Executable @Arguments 2>&1 | ForEach-Object { Write-Host "$_" } } finally { $ErrorActionPreference = $previous }
+  if ($LASTEXITCODE -ne 0) { throw "Build command failed: $Executable ($LASTEXITCODE)" }
+}
 New-Item -ItemType Directory -Force -Path $build,(Join-Path $build 'java'),(Join-Path $build 'classes'),(Join-Path $build 'dex'),$release | Out-Null
 Invoke-Checked (Join-Path $tools 'aapt2.exe') @('compile','--dir',(Join-Path $root 'android/res'),'-o',(Join-Path $build 'resources.zip'))
 Invoke-Checked (Join-Path $tools 'aapt2.exe') @('link','-o',(Join-Path $build 'base.apk'),'-I',(Join-Path $platform 'android.jar'),'--manifest',(Join-Path $root 'android/AndroidManifest.xml'),'-A',(Join-Path $root 'dist/web'),'--java',(Join-Path $build 'java'),(Join-Path $build 'resources.zip'))
