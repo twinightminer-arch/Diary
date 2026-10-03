@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="theme-color" content="#f8f7f4"><title>Diary</title><link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div id="lockScreen" class="lock-screen" hidden>
+    <div class="lock-card">
+      <div class="brand-icon">D<span>•</span></div>
+      <h1 data-i="unlock"></h1>
+      <p id="lockHint" class="lock-hint"></p>
+      <input id="lockPasscode" type="password" autocomplete="off" data-placeholder="password">
+      <button id="lockSubmit" class="primary" data-i="unlock"></button>
+      <button id="lockSet" class="text-button" data-i="setPasscode" hidden></button>
+      <button id="lockClear" class="text-button danger" data-i="clearAccount" hidden></button>
+    </div>
+  </div>
+
+  <aside class="sidebar">
+    <header class="brand"><span class="brand-icon">D<span>•</span></span><div>Diary<small data-i="tagline"></small></div><img id="avatarImg" class="avatar-img" alt="" hidden><button id="closeSidebar" class="mobile-only icon-button" aria-label="Close">×</button></header>
+    <button id="newEntry" class="primary new-button"><span>＋</span><span data-i="newEntry"></span></button>
+    <label class="search"><span>⌕</span><input id="search" type="search" data-placeholder="search" autocomplete="off"></label>
+    <div class="list-heading"><span data-i="allEntries"></span><span id="entryCount">0</span></div>
+    <nav id="entries" aria-label="Entries"></nav>
+    <div id="batchBar" class="batch-bar" hidden>
+      <span class="batch-count"><span id="batchCount">0</span> <span data-i="selectedCount"></span></span>
+      <div class="batch-actions">
+        <button id="batchEncrypt" class="text-button" data-i="batchEncrypt"></button>
+        <button id="batchDecrypt" class="text-button" data-i="batchDecrypt"></button>
+        <button id="batchChange" class="text-button" data-i="batchChange"></button>
+        <button id="batchCancel" class="text-button" data-i="batchCancel"></button>
+      </div>
+    </div>
+    <footer class="sidebar-footer"><button id="import" class="text-button" data-i="import"></button><button id="settings" class="text-button" data-i="settings"></button><button id="lockNow" class="text-button" data-i="lockApp"></button><div class="local-indicator"><span></span><span data-i="localOnly"></span></div></footer>
+  </aside>
+
+  <main>
+    <header class="topbar"><div class="breadcrumb"><button id="openSidebar" class="mobile-only icon-button" aria-label="Menu">☰</button><span data-i="journal"></span><span class="slash">/</span><span id="breadcrumbDate"></span></div><div class="top-actions"><span class="offline-pill" data-i="offline"></span><button id="theme" class="icon-button" aria-label="Theme">◐</button></div></header>
+    <section id="empty" class="empty"><div class="empty-book">D<span>•</span></div><p class="eyebrow">YOUR DAYS, YOUR WORDS</p><h1 data-i="welcome"></h1><p data-i="welcomeDetail"></p><button id="firstEntry" class="primary" data-i="startWriting"></button><small data-i="privateNote"></small></section>
+    <section id="workspace" hidden>
+      <div class="document-header"><div class="document-kicker"><span id="entryDate"></span><span id="securityBadge"></span></div><input id="title" data-placeholder="untitled" autocomplete="off" maxlength="200" aria-label="Title"><div class="entry-toolbar"><div class="view-tabs"><button id="editTab" class="active" data-i="write"></button><button id="previewTab" data-i="preview"></button></div><div class="document-actions"><button id="aiButton" class="text-button" data-i="aiAssistant"></button><button id="webButton" class="text-button" data-i="webInfo"></button><button id="encrypt" class="text-button" data-i="encrypt"></button><button id="lock" class="text-button" data-i="lock" hidden></button><button id="more" class="icon-button" aria-label="More">•••</button><button id="save" class="primary compact" data-i="save"></button></div></div><div id="moreMenu" class="more-menu" hidden><button id="export" data-i="export"></button><button id="changePassword" data-i="changePasscode"></button><button id="decrypt" data-i="decrypt"></button><button id="delete" class="danger" data-i="deleteEntry"></button></div></div>
+      <textarea id="editor" spellcheck="true" data-placeholder="editorPlaceholder" aria-label="Markdown"></textarea><article id="preview" class="markdown" hidden></article>
+      <footer class="document-footer"><span id="saveState"></span><span id="wordCount"></span></footer>
+    </section>
+    <div id="toast" role="status" hidden></div>
+  </main>
+
+  <div id="aiPopover" class="popover" hidden>
+    <div class="popover-head"><strong data-i="aiAssistant"></strong><button id="aiClose" class="icon-button" aria-label="Close">×</button></div>
+    <select id="aiTask">
+      <option value="compose" data-i="aiCompose"></option>
+      <option value="polish" data-i="aiPolish"></option>
+      <option value="title" data-i="aiTitle"></option>
+      <option value="continue" data-i="aiContinue"></option>
+      <option value="illustrate" data-i="aiIllustrate"></option>
+    </select>
+    <textarea id="aiPrompt" data-placeholder="aiPrompt" rows="3"></textarea>
+    <button id="aiRun" class="primary" data-i="aiAssistant"></button>
+    <div id="aiResult" class="ai-result"></div>
+    <button id="aiInsert" class="text-button" data-i="aiInsert" hidden></button>
+  </div>
+
+  <div id="webPopover" class="popover" hidden>
+    <div class="popover-head"><strong data-i="webInfo"></strong><button id="webClose" class="icon-button" aria-label="Close">×</button></div>
+    <button id="webDate" class="text-button block" data-i="fetchDate"></button>
+    <div class="web-row"><input id="webLat" placeholder="lat" autocomplete="off"><input id="webLon" placeholder="lon" autocomplete="off"><button id="webWeather" class="text-button" data-i="fetchWeather"></button></div>
+    <div id="webResult" class="ai-result"></div>
+  </div>
+
+  <section id="settingsPanel" class="settings-panel" hidden>
+    <header class="settings-head"><strong>Diary</strong><button id="settingsClose" class="icon-button" aria-label="Close">×</button></header>
+    <nav class="settings-tabs">
+      <button data-tab="ai" class="active" data-i="settingsAi"></button>
+      <button data-tab="account" data-i="settingsAccount"></button>
+      <button data-tab="profile" data-i="settingsProfile"></button>
+      <button data-tab="media" data-i="settingsMedia"></button>
+      <button data-tab="lang" data-i="language"></button>
+    </nav>
+    <div class="settings-body">
+      <div data-tabpanel="ai">
+        <label class="field"><span data-i="provider"></span><select id="cfgProvider"></select></label>
+        <label class="field"><span data-i="baseUrl"></span><input id="cfgBaseUrl" type="text" autocomplete="off"></label>
+        <label class="field"><span data-i="model"></span><input id="cfgModel" type="text" autocomplete="off"></label>
+        <label class="field"><span data-i="apiKey"></span><input id="cfgApiKey" type="password" autocomplete="off" data-placeholder="apiKey"></label>
+        <button id="cfgSave" class="primary" data-i="saveConfig"></button>
+        <p class="hint" data-i="about"></p>
+      </div>
+      <div data-tabpanel="account" hidden>
+        <p id="accountState" class="hint"></p>
+        <button id="accountSet" class="text-button" data-i="setPasscode"></button>
+        <button id="accountClear" class="text-button danger" data-i="clearAccount"></button>
+        <hr>
+        <p class="hint" data-i="googleLogin"></p>
+        <label class="field"><span data-i="clientId"></span><input id="googleClientId" type="text" autocomplete="off"></label>
+        <button id="googleStart" class="text-button" data-i="oauthStart"></button>
+        <label class="field"><span data-i="oauthCode"></span><input id="googleCode" type="text" autocomplete="off"></label>
+        <button id="googleFinish" class="text-button" data-i="oauthFinish"></button>
+        <hr>
+        <p class="hint" data-i="microsoftLogin"></p>
+        <label class="field"><span data-i="clientId"></span><input id="microsoftClientId" type="text" autocomplete="off"></label>
+        <button id="microsoftStart" class="text-button" data-i="oauthStart"></button>
+        <label class="field"><span data-i="oauthCode"></span><input id="microsoftCode" type="text" autocomplete="off"></label>
+        <button id="microsoftFinish" class="text-button" data-i="oauthFinish"></button>
+        <p class="hint" data-i="oauthTip"></p>
+      </div>
+      <div data-tabpanel="profile" hidden>
+        <label class="field"><span data-i="username"></span><input id="profileUsername" type="text" autocomplete="off"></label>
+        <label class="field"><span data-i="signature"></span><input id="profileSignature" type="text" autocomplete="off"></label>
+        <label class="field"><span data-i="avatar"></span><button id="profileAvatar" class="text-button" data-i="importAvatar"></button></label>
+        <img id="profileAvatarPreview" class="avatar-preview" alt="" hidden>
+        <button id="profileSave" class="primary" data-i="saveConfig"></button>
+      </div>
+      <div data-tabpanel="media" hidden>
+        <p class="hint" data-i="background"></p>
+        <button id="bgImport" class="text-button" data-i="import"></button>
+        <button id="bgClear" class="text-button" data-i="clearMedia"></button>
+        <hr>
+        <p class="hint" data-i="bgm"></p>
+        <button id="bgmImport" class="text-button" data-i="import"></button>
+        <button id="bgmClear" class="text-button" data-i="clearMedia"></button>
+        <hr>
+        <p class="hint" data-i="mediaGallery"></p>
+        <div id="mediaGallery" class="media-gallery"></div>
+      </div>
+      <div data-tabpanel="lang" hidden>
+        <label class="field"><span data-i="language"></span><select id="cfgLocale"><option value="zh-CN">简体中文</option><option value="zh-TW">繁體中文</option><option value="en-US">English</option><option value="ja-JP">日本語</option><option value="ko-KR">한국어</option></select></label>
+      </div>
+    </div>
+  </section>
+
+  <audio id="bgmPlayer" loop hidden></audio>
+
+  <dialog id="modal"><form id="modalForm"><h2 id="modalTitle"></h2><p id="modalMessage"></p><div id="modalFields"></div><p id="modalError" class="danger" role="alert"></p><div class="modal-actions"><button type="button" id="modalCancel" class="text-button" data-i="cancel"></button><button type="submit" id="modalConfirm" class="primary" data-i="confirm"></button></div></form></dialog>
+  <script type="module" src="app/app.js"></script>
+</body>
+</html>

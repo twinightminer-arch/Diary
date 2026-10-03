@@ -1,0 +1,28 @@
+{
+  "name": "diary",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "check": "tsc --noEmit",
+    "build": "node scripts/build.mjs",
+    "start": "electron .",
+    "dist:windows": "npm run build && electron-builder --win",
+    "test:desktop": "node --test test/desktop.e2e.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.63.0",
+    "@types/node": "^24.19.0",
+    "electron": "^44.5.0",
+    "electron-builder": "^26.15.3",
+    "typescript": "^5.9.3"
+  },
+  "main": "dist/desktop/main.js",
+  "description": "Private, local-first Markdown diary",
+  "author": "Diary contributors"
+}

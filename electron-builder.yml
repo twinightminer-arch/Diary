@@ -1,0 +1,36 @@
+appId: app.diary.local
+productName: Diary
+copyright: Copyright © 2026 Diary contributors
+directories:
+  output: ../releases
+  buildResources: assets
+files:
+  - dist/**
+  - package.json
+  - LICENSE.md
+  - UPSTREAM.md
+  - README.md
+asar: true
+npmRebuild: false
+electronDist: node_modules/electron/dist
+win:
+  icon: assets/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  artifactName: Diary-${version}-Windows-Setup.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: Diary
+  deleteAppDataOnUninstall: false
+  installerLanguages: [zh_CN, zh_TW, en_US, ja_JP, ko_KR]
+  language: '2052'
+  license: LICENSE.md
+portable:
+  artifactName: Diary-${version}-Windows-Portable.exe
