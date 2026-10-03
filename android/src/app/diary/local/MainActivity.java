@@ -10,7 +10,6 @@ import android.util.AtomicFile;
 import android.util.Base64;
 import android.webkit.*;
 import android.view.View;
-import android.view.WindowManager;
 import org.json.*;
 import java.io.*;
 import java.net.HttpURLConnection;
@@ -38,8 +37,8 @@ public final class MainActivity extends Activity {
 
   @Override public void onCreate(Bundle state) {
     super.onCreate(state);
-    // Prevent screenshots and app-switcher thumbnails from exposing unlocked diary text.
-    getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+    // Screenshots and app-switcher previews are intentionally allowed. Users own
+    // their local data and may capture or share the screen like any other app.
     getWindow().setStatusBarColor(Color.rgb(248, 247, 244));
     getWindow().setNavigationBarColor(Color.rgb(248, 247, 244));
     vault = new File(getFilesDir(), "journals");
@@ -227,7 +226,7 @@ public final class MainActivity extends Activity {
               if (!target.isFile() || !target.delete()) throw new IOException("Cannot delete entry");
               break;
             }
-            case "info": result = new JSONObject().put("platform", "Android").put("location", vault.getAbsolutePath()).put("version", "0.2.0"); break;
+            case "info": result = new JSONObject().put("platform", "Android").put("location", vault.getAbsolutePath()).put("version", "0.2.2"); break;
             case "import": case "export": {
               final byte[] payload = op.equals("export") ? read(file(request.getString("id"))).getBytes(StandardCharsets.UTF_8) : null;
               final String name = request.optString("id", "diary") + ".md";
