@@ -28,7 +28,15 @@ async function unseal(sealed: string, key: CryptoKey): Promise<string> {
   return decoder.decode(await subtle.decrypt({ name: 'AES-GCM', iv }, key, data));
 }
 
-export interface ProviderConfig { baseUrl: string; model: string; apiKeySealed?: string }
+export interface ProviderConfig {
+  baseUrl: string;
+  model: string;
+  /** Display name. Only set for user-created backends; built-ins use a table. */
+  label?: string;
+  /** True for a backend the user added by hand (可改名、可删除). */
+  custom?: boolean;
+  apiKeySealed?: string;
+}
 
 /**
  * One local account = one independent identity. Every user owns a private
@@ -68,13 +76,19 @@ export interface GoogleIdentity {
 export interface StoredToken { accessToken: string; linkedUserId: string | null }
 export interface Session { userId: string | null; remember: boolean }
 
-export type BackgroundKind = 'image' | 'video' | 'wallpaper';
+export type BackgroundKind = 'image' | 'video' | 'wallpaper' | 'file';
 export interface WallpaperRef { path: string; title: string; animated: boolean }
 export interface BackgroundState {
   /** How the background is produced. `null` means "no background". */
   kind: BackgroundKind | null;
   /** Media id of an imported picture or clip (lives in <vault>/media). */
   media: string | null;
+  /**
+   * Plain file name inside `<vault>/backgrounds`, used when kind === 'file'.
+   * The folder is meant to be browsable — the user can see their own file
+   * names and drop new pictures in by hand — so a name, not an opaque id.
+   */
+  file: string | null;
   /** Wallpaper Engine project, used when kind === 'wallpaper'. */
   wallpaper: WallpaperRef | null;
   fit: 'cover' | 'contain' | 'tile' | 'center';
@@ -82,6 +96,14 @@ export interface BackgroundState {
   dim: number;
   /** Backdrop blur in px. */
   blur: number;
+  /**
+   * How see-through the wallpaper itself is, 0…100. **0 means untouched
+   * original quality** — the clip plays exactly as it was encoded. 100 leaves
+   * nothing but the page behind it.
+   */
+  opacity: number;
+  /** Brightness in percent; 100 is the clip as encoded. */
+  brightness: number;
 }
 export interface PermissionState {
   /** Master switch for every outbound request the app makes. */
@@ -112,6 +134,8 @@ export interface PersistedConfig {
   media: { background: BackgroundState; bgm: string | null };
   /** Built-in feature switches, e.g. { wallpaper: false } disables the plugin. */
   plugins: { disabled: string[] };
+  /** On/off switch per AI plugin file in <userData>/plugins. Missing = on. */
+  pluginStates: Record<string, boolean>;
   permissions: PermissionState;
   location: LocationState;
   /** Optional extra folder scanned for Wallpaper Engine projects. */
@@ -130,9 +154,21 @@ const DEFAULT_PROVIDERS: Record<string, ProviderConfig> = {
   local: { baseUrl: 'http://127.0.0.1:3000/v1', model: 'deepseek-v4-flash' },
 };
 
+/** Ids owned by the built-in table — a hand-made backend may not claim one. */
+export const DEFAULT_PROVIDER_IDS: ReadonlySet<string> = new Set(Object.keys(DEFAULT_PROVIDERS));
+
 export const EMPTY_BACKGROUND: BackgroundState = {
-  kind: null, media: null, wallpaper: null, fit: 'cover', dim: 0, blur: 0,
+  kind: null, media: null, file: null, wallpaper: null,
+  fit: 'cover', dim: 0, blur: 0, opacity: 0, brightness: 100,
 };
+
+/** Clamps one background number into its documented range. */
+export function clampBackgroundNumber(field: 'dim' | 'blur' | 'opacity' | 'brightness', value: number): number {
+  const range = { dim: [0, 1], blur: [0, 40], opacity: [0, 100], brightness: [50, 150] } as const;
+  if (!Number.isFinite(value)) return EMPTY_BACKGROUND[field];
+  const [min, max] = range[field];
+  return Math.min(max, Math.max(min, value));
+}
 
 function defaultConfig(): PersistedConfig {
   return {
@@ -143,10 +179,23 @@ function defaultConfig(): PersistedConfig {
     profile: { username: '', avatar: null, signature: '' },
     media: { background: structuredClone(EMPTY_BACKGROUND), bgm: null },
     plugins: { disabled: [] },
+    pluginStates: {},
     // Offline-first: nothing leaves the machine until the user opts in.
     permissions: { network: false, location: false },
     location: { mode: 'auto', lat: null, lon: null, label: '' },
     wallpaperDir: null,
+  };
+}
+
+/** Old configs predate opacity/brightness; fill and clamp them in. */
+function sanitiseBackground(raw: Partial<BackgroundState>): BackgroundState {
+  const merged = { ...structuredClone(EMPTY_BACKGROUND), ...raw };
+  return {
+    ...merged,
+    dim: clampBackgroundNumber('dim', merged.dim),
+    blur: clampBackgroundNumber('blur', merged.blur),
+    opacity: clampBackgroundNumber('opacity', merged.opacity),
+    brightness: clampBackgroundNumber('brightness', merged.brightness),
   };
 }
 
@@ -156,9 +205,7 @@ function normalizeMedia(raw: unknown): { background: BackgroundState; bgm: strin
   const bgm = typeof media.bgm === 'string' ? media.bgm : null;
   const flat = media.background;
   if (typeof flat === 'string') return { background: { ...structuredClone(EMPTY_BACKGROUND), kind: 'image', media: flat }, bgm };
-  if (flat && typeof flat === 'object') {
-    return { background: { ...structuredClone(EMPTY_BACKGROUND), ...(flat as Partial<BackgroundState>) }, bgm };
-  }
+  if (flat && typeof flat === 'object') return { background: sanitiseBackground(flat as Partial<BackgroundState>), bgm };
   return { background: structuredClone(EMPTY_BACKGROUND), bgm };
 }
 
@@ -203,6 +250,16 @@ function migrate(raw: Partial<PersistedConfig> & { account?: Record<string, unkn
   });
 }
 
+/** Keeps only `id -> boolean` pairs, so a hand-edited config cannot break us. */
+function sanitisePluginStates(raw: unknown): Record<string, boolean> {
+  if (!raw || typeof raw !== 'object') return {};
+  const out: Record<string, boolean> = {};
+  for (const [id, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (id && typeof value === 'boolean') out[id] = value;
+  }
+  return out;
+}
+
 /** Adds every field introduced after version 1 without dropping existing data. */
 function reconcile(raw: Partial<PersistedConfig>): PersistedConfig {
   const base = defaultConfig();
@@ -213,6 +270,7 @@ function reconcile(raw: Partial<PersistedConfig>): PersistedConfig {
     profile: { ...base.profile, ...(raw.profile ?? {}) },
     media: normalizeMedia(raw.media),
     plugins: { disabled: Array.isArray(raw.plugins?.disabled) ? raw.plugins.disabled.filter(item => typeof item === 'string') : [] },
+    pluginStates: sanitisePluginStates(raw.pluginStates),
     permissions: { ...base.permissions, ...(raw.permissions ?? {}) },
     location: { ...base.location, ...(raw.location ?? {}) },
     wallpaperDir: typeof raw.wallpaperDir === 'string' && raw.wallpaperDir ? raw.wallpaperDir : null,
@@ -262,6 +320,8 @@ export class HostConfig {
   setProvider(id: string, patch: Partial<Omit<ProviderConfig, 'apiKeySealed'>>): void {
     this.#data.providers[id] = { ...(this.#data.providers[id] ?? DEFAULT_PROVIDERS[id]!), ...patch };
   }
+  /** Drops a user-created backend. The caller checks it is safe to remove. */
+  removeProvider(id: string): void { delete this.#data.providers[id]; }
 
   async setSecret(key: string, value: string): Promise<void> {
     if (!this.#deviceKey) throw new Error('Config not initialized');
@@ -281,7 +341,9 @@ export class HostConfig {
 
   // ---- Background / wallpaper ----
   setBackground(patch: Partial<BackgroundState>): void {
-    this.#data.media = { ...this.#data.media, background: { ...this.#data.media.background, ...patch } };
+    // Every number is clamped here so a bad slider value can never be persisted.
+    const next = sanitiseBackground({ ...this.#data.media.background, ...patch });
+    this.#data.media = { ...this.#data.media, background: next };
   }
   clearBackground(): void { this.#data.media = { ...this.#data.media, background: structuredClone(EMPTY_BACKGROUND) }; }
   get background(): Readonly<BackgroundState> { return this.#data.media.background; }
@@ -293,6 +355,11 @@ export class HostConfig {
   setPermissions(patch: Partial<PermissionState>): void { this.#data.permissions = { ...this.#data.permissions, ...patch }; }
   get location(): Readonly<LocationState> { return this.#data.location; }
   setLocation(patch: Partial<LocationState>): void { this.#data.location = { ...this.#data.location, ...patch }; }
+
+  // ---- External AI plugin switches ----
+  /** A plugin never seen before defaults to enabled. */
+  isAiPluginEnabled(id: string): boolean { return this.#data.pluginStates[id] !== false; }
+  setAiPluginEnabled(id: string, enabled: boolean): void { this.#data.pluginStates[id] = enabled; }
 
   // ---- Built-in feature plugins ----
   get disabledPlugins(): readonly string[] { return this.#data.plugins.disabled; }

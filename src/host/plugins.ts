@@ -2,7 +2,7 @@
 // Plugin loader for the AI access layer.
 //
 // Drop a .mjs file into <userData>/plugins/ and it becomes a first-class AI
-// backend inside Diary: it shows up in 设置 → AI, it can be selected as the
+// backend inside Diary: it shows up in the sidebar's AI 模型 screen, it can be selected as the
 // active provider, and it can either reuse the built-in OpenAI-compatible
 // transport (just declare baseUrl + model) or implement `chat()` itself to talk
 // to a local CLI, a bespoke gateway, or any non-OpenAI protocol.
@@ -27,6 +27,12 @@ export type ProviderPlugin = {
   /** Defaults written into the config the first time the plugin is seen. */
   readonly baseUrl?: string;
   readonly model?: string;
+  /**
+   * Every model this backend can serve, written as `<vendor>/<model>` so the
+   * same name never means two things on screen. Shown as the picker's
+   * suggestions; the first entry is the default.
+   */
+  readonly models?: readonly string[];
   /** Custom transport. When omitted the built-in OpenAI-compatible client is used. */
   readonly chat?: (input: ProviderPluginChatInput) => Promise<string> | string;
   readonly generateImage?: (input: ProviderPluginImageInput) => Promise<ImageResult> | ImageResult;
@@ -40,7 +46,11 @@ export type DiaryPlugin = {
 };
 
 export type PluginError = { file: string; message: string };
-export type PluginSource = { file: string; id: string; label: string; baseUrl: string; model: string; custom: boolean };
+/** A loaded plugin as the UI sees it. `enabled` is the user's on/off switch. */
+export type PluginSource = {
+  file: string; id: string; label: string; baseUrl: string; model: string;
+  custom: boolean; models: string[]; enabled: boolean;
+};
 export type LoadedPlugins = { providers: ProviderPlugin[]; sources: PluginSource[]; errors: PluginError[]; directory: string };
 
 const TEMPLATE = `// Diary AI plugin — every file here is loaded at startup.
@@ -89,27 +99,56 @@ export default {
 //      injects it into every child process, and a standalone CLI reads it and
 //      tries to bind that same port. It collides with the running sidecar,
 //      throws EADDRINUSE, and then **never exits** — Diary just spins forever.
-//   2. The CLI authenticates on its own. If it has never been logged in, it
-//      prints "Authentication required." and we surface that as a plain
-//      instruction instead of a stack trace.
-const WORKBUDDY_PLUGIN = `// Diary AI 插件 —— 连接本机 WorkBuddy（CodeBuddy CLI）
+//   2. The CLI keeps its own login, so a bare `codebuddy -p` answers with
+//      "Authentication required." The fix is to reuse the desktop app's own
+//      session instead of asking for a second login: WorkBuddy holds a
+//      Keycloak access token in memory (nothing usable is ever written to
+//      disk), so the plugin lifts it out of the running process with the
+//      shipped `workbuddy-token.py` and hands it to the CLI as
+//      `CODEBUDDY_AUTH_TOKEN` — the CLI's documented bring-your-own-token
+//      entry point.
+const WORKBUDDY_PLUGIN = `// Diary AI 插件 —— 连接本机 WorkBuddy（免登录）
 //
 // 把 WorkBuddy 桌面版自带的 codebuddy CLI 当成一个模型后端来用：
 //     codebuddy -p "<prompt>" --tools ""
 // 只取标准输出作为回答，所以不会进入交互式界面。
 //
+// 认证是全自动的，不需要 /login，也不需要填 API Key：
+//   WorkBuddy 桌面版把自己的登录令牌只放在内存里（磁盘上找不到可用的），
+//   所以本插件用同目录的 workbuddy-token.py 从正在运行的 WorkBuddy 进程里
+//   把它读出来，再通过环境变量 CODEBUDDY_AUTH_TOKEN 交给 CLI。
+//   前提是 WorkBuddy 桌面版开着并且已经登录（本来就是这个后端的使用条件）。
+//
 // 两个踩过的坑，改之前请先读懂：
 //  1) 调用前必须删掉环境变量 SERVER__PORT。WorkBuddy 会把它注入所有子进程，
 //     而独立启动的 CLI 会拿它去 bind 同一个端口，撞上正在运行的 sidecar 之后
 //     报 EADDRINUSE 并永远不退出 —— 在 Diary 里表现为一直转圈。
-//  2) CLI 需要自己登录一次。没登录时它会输出 "Authentication required."，
-//     本插件会把它翻译成一句人话。
+//  2) 令牌会过期，所以要带过期时间缓存；过期了就重新读一次内存。
+//     读内存需要一个 Python 解释器，WorkBuddy 自带的那个优先。
 //
-// 想换模型：改下面的 model，可选 hy3 / hy3-x / deepseek-v4.1-flash /
-// glm-5.3 / kimi-k3-1 等（以 codebuddy --model 支持的为准）。
+// 想换模型：改下面 MODELS 里的任意一项，或把默认那一项挪到第一位。
+// 写法统一为 workbuddy/<型号>，和界面上显示的名字一模一样；workbuddy/ 前缀
+// 只是给 Diary 看的名字空间，真正传给 codebuddy --model 时会剥掉。
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { homedir, tmpdir } from 'node:os';
+
+// 可选模型（以 codebuddy --model 实际支持的为准）。第一个是默认值。
+const MODELS = [
+  'workbuddy/hy3',
+  'workbuddy/hy3-x',
+  'workbuddy/deepseek-v4.1-flash',
+  'workbuddy/glm-5.3',
+  'workbuddy/kimi-k3-1',
+];
+const DEFAULT_MODEL = MODELS[0];
+const NS = 'workbuddy/';
+// Diary 里存的是 workbuddy/xxx，CLI 只认 xxx。
+function cliModel(model) {
+  const raw = String(model || DEFAULT_MODEL).trim();
+  return raw.startsWith(NS) ? raw.slice(NS.length) : raw;
+}
 
 // WorkBuddy 会话注入给子进程的变量，独立跑 CLI 时必须剔除。
 const SESSION_VARS = [
@@ -148,6 +187,144 @@ function nodeBinaries() {
   return list;
 }
 
+// ---- 登录令牌 -----------------------------------------------------------
+// WorkBuddy 把登录令牌只放在内存里，所以要用 workbuddy-token.py 现场读一次。
+// 令牌自带过期时间（exp），缓存下来，避免每问一句都去扫一遍进程内存。
+
+function tokenScript(extension) {
+  const list = [];
+  const override = process.env.DIARY_WORKBUDDY_TOKEN_SCRIPT;
+  if (override && override.endsWith(extension)) list.push(override);
+  // Diary ships both a Python and a PowerShell flavour of the helper and uses
+  // whichever runtime this machine actually has.
+  const name = 'workbuddy-token' + extension;
+  if (typeof process.resourcesPath === 'string') list.push(join(process.resourcesPath, name));
+  list.push(join(dirname(process.execPath), 'resources', name));
+  for (const candidate of list) { if (candidate && existsSync(candidate)) return candidate; }
+  return null;
+}
+
+function pythonBinaries() {
+  const list = [];
+  if (process.env.DIARY_WORKBUDDY_PY && existsSync(process.env.DIARY_WORKBUDDY_PY)) list.push(process.env.DIARY_WORKBUDDY_PY);
+  // WorkBuddy 自带一个 Python：装了 WorkBuddy 就一定有它，优先用。
+  const bundled = join(homedir(), '.workbuddy', 'binaries', 'python', 'versions');
+  try {
+    for (const version of readdirSync(bundled).sort().reverse()) {
+      const exe = join(bundled, version, 'python.exe');
+      if (existsSync(exe)) list.push(exe);
+    }
+  } catch { }
+  const local = process.env.LOCALAPPDATA || '';
+  if (local) {
+    const programs = join(local, 'Programs', 'Python');
+    try {
+      for (const folder of readdirSync(programs).sort().reverse()) {
+        const exe = join(programs, folder, 'python.exe');
+        if (existsSync(exe)) list.push(exe);
+      }
+    } catch { }
+  }
+  list.push('python.exe', 'python', 'python3');
+  return list;
+}
+
+function powershellBinaries() {
+  const root = process.env.SystemRoot || process.env.windir || 'C:\\\\Windows';
+  return [
+    join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    'pwsh.exe',
+    'powershell.exe',
+  ];
+}
+
+function tokenCachePath() {
+  return join(process.env.LOCALAPPDATA || tmpdir(), 'Diary', 'workbuddy-token.json');
+}
+
+function readTokenCache() {
+  try {
+    const data = JSON.parse(readFileSync(tokenCachePath(), 'utf8'));
+    if (data && typeof data.token === 'string' && typeof data.exp === 'number') return data;
+  } catch { }
+  return null;
+}
+
+function writeTokenCache(record) {
+  try {
+    const file = tokenCachePath();
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify(record), 'utf8');
+  } catch { }
+}
+
+function runCapture(command, args, env, timeoutMs) {
+  return new Promise(function (resolve) {
+    execFile(command, args, {
+      timeout: timeoutMs,
+      maxBuffer: 4 * 1024 * 1024,
+      windowsHide: true,
+      encoding: 'utf8',
+      env: env,
+    }, function (error, stdout, stderr) {
+      resolve({ error: error, stdout: String(stdout || ''), stderr: String(stderr || '') });
+    });
+  });
+}
+
+// 跑一次提取脚本，把最后一行 JSON 解析出来。
+async function probeToken(command, args, env) {
+  const result = await runCapture(command, args, env, 120000);
+  const lines = (result.stdout || '').trim().split('\\n');
+  const text = (lines[lines.length - 1] || '').trim();
+  if (!text) {
+    const reason = (result.stderr || '').trim() || (result.error ? result.error.message : '');
+    return { ok: false, reason: reason, retry: true };
+  }
+  let parsed = null;
+  try { parsed = JSON.parse(text); } catch { return { ok: false, reason: text.slice(0, 200), retry: true }; }
+  if (parsed && parsed.ok && parsed.token) return parsed;
+  const reason = (parsed && parsed.reason) || '未知错误';
+  // 解释器本身没问题，只是 WorkBuddy 没开着：再换解释器也一样，直接放弃。
+  return { ok: false, reason: reason, retry: !/not running/i.test(reason) };
+}
+
+async function discoverToken() {
+  const env = Object.assign({}, process.env);
+  for (const key of SESSION_VARS) delete env[key];
+  let last = '';
+  const python = tokenScript('.py');
+  if (python) {
+    for (const bin of pythonBinaries()) {
+      const outcome = await probeToken(bin, [python], env);
+      if (outcome.ok) return outcome;
+      last = outcome.reason || last;
+      if (!outcome.retry) break;
+    }
+  }
+  const powershell = tokenScript('.ps1');
+  if (powershell) {
+    for (const bin of powershellBinaries()) {
+      const outcome = await probeToken(bin, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', powershell], env);
+      if (outcome.ok) return outcome;
+      last = outcome.reason || last;
+      if (!outcome.retry) break;
+    }
+  }
+  if (!python && !powershell) last = '没找到 workbuddy-token.py / .ps1';
+  throw new Error('没能自动取得 WorkBuddy 的登录令牌（' + (last || '原因未知')
+    + '）。请确认 WorkBuddy 桌面版已经打开并且处于登录状态。');
+}
+
+async function sessionToken() {
+  const cached = readTokenCache();
+  // 留 5 分钟余量，免得刚好卡在过期边界上。
+  if (cached && cached.exp * 1000 - Date.now() > 5 * 60 * 1000) return cached.token;
+  const fresh = await discoverToken();
+  writeTokenCache({ token: fresh.token, exp: fresh.exp });
+  return fresh.token;
+}
+
 function runOnce(command, args, env, timeoutMs) {
   return new Promise(function (resolve) {
     execFile(command, args, {
@@ -162,7 +339,18 @@ function runOnce(command, args, env, timeoutMs) {
   });
 }
 
-async function ask(prompt, options) {
+// 认证令牌：优先用设置里手填的那一个，否则自动从 WorkBuddy 桌面版读。
+async function pickToken(options, force) {
+  if (options.apiKey) return options.apiKey;
+  if (!force) return await sessionToken();
+  // 缓存里的令牌被服务端拒了：丢掉重读一次内存，通常立刻就好。
+  writeTokenCache({ token: '', exp: 0 });
+  const fresh = await discoverToken();
+  writeTokenCache({ token: fresh.token, exp: fresh.exp });
+  return fresh.token;
+}
+
+async function runCli(prompt, options, token) {
   const script = cliScript();
   if (!script) {
     throw new Error('没找到 WorkBuddy 的 codebuddy CLI。请确认已安装 WorkBuddy 桌面版；'
@@ -171,8 +359,9 @@ async function ask(prompt, options) {
 
   const env = Object.assign({}, process.env);
   for (const key of SESSION_VARS) delete env[key];
-  if (options.apiKey) env.CODEBUDDY_API_KEY = options.apiKey;
-  else delete env.CODEBUDDY_API_KEY;
+  // 令牌只走 CODEBUDDY_AUTH_TOKEN 这一个入口，免得旧的 API Key 变量把它盖掉。
+  delete env.CODEBUDDY_API_KEY;
+  env.CODEBUDDY_AUTH_TOKEN = token;
 
   const args = ['-p', prompt, '--tools', ''];
   if (options.model) args.push('--model', options.model);
@@ -192,8 +381,9 @@ async function ask(prompt, options) {
     const result = await runOnce(attempt.command, [script].concat(args), attempt.env, options.timeoutMs);
     const combined = result.stdout + result.stderr;
     if (/Authentication required/i.test(combined)) {
-      throw new Error('WorkBuddy CLI 还没登录。请在终端里运行一次 codebuddy 并输入 /login 完成登录；'
-        + '或者把 WorkBuddy 的 API Key 填进设置 → AI 的「API Key」里。');
+      const error = new Error('WorkBuddy 的登录令牌被拒绝了。请打开 WorkBuddy 桌面版确认已登录，然后重试。');
+      error.code = 'AUTH';
+      throw error;
     }
     const text = result.stdout.trim();
     if (text) return text;
@@ -202,13 +392,26 @@ async function ask(prompt, options) {
   throw new Error('调用 WorkBuddy CLI 没有得到回复。' + (lastStderr ? '（' + lastStderr.slice(0, 300) + '）' : ''));
 }
 
+async function ask(prompt, options) {
+  try {
+    return await runCli(prompt, options, await pickToken(options, false));
+  } catch (error) {
+    if (error && error.code === 'AUTH' && !options.apiKey) {
+      // 令牌刚好过期是常态，不是故障：静默重读一次再试。
+      return await runCli(prompt, options, await pickToken(options, true));
+    }
+    throw error;
+  }
+}
+
 export default {
   id: 'workbuddy',
   name: 'WorkBuddy 本机 CLI',
   provider: {
     id: 'workbuddy',
     label: 'WorkBuddy（本机 AI）',
-    model: 'hy3',
+    model: DEFAULT_MODEL,
+    models: MODELS,
     async chat(input) {
       const parts = [];
       if (input.system) parts.push(input.system);
@@ -217,7 +420,7 @@ export default {
         parts.push(role + message.content);
       }
       return await ask(parts.join('\\n\\n'), {
-        model: input.model || 'hy3',
+        model: cliModel(input.model),
         apiKey: input.apiKey,
         timeoutMs: 180000,
       });
@@ -238,7 +441,7 @@ export async function ensurePluginDirectory(directory: string): Promise<void> {
 }
 
 /** Loads every .mjs/.js file in the directory. A broken plugin never blocks startup. */
-export async function loadPlugins(directory: string): Promise<LoadedPlugins> {
+export async function loadPlugins(directory: string, isEnabled?: (id: string) => boolean): Promise<LoadedPlugins> {
   const providers: ProviderPlugin[] = [];
   const sources: PluginSource[] = [];
   const errors: PluginError[] = [];
@@ -265,6 +468,8 @@ export async function loadPlugins(directory: string): Promise<LoadedPlugins> {
           baseUrl: provider.baseUrl ?? '',
           model: provider.model ?? '',
           custom: typeof provider.chat === 'function',
+          models: [...(provider.models ?? [])],
+          enabled: isEnabled ? isEnabled(provider.id) : true,
         });
       }
     } catch (error) {

@@ -10,6 +10,14 @@ files:
   - LICENSE.md
   - UPSTREAM.md
   - README.md
+# The WorkBuddy bridge plugin reads the desktop app's live session token with
+# this helper. It has to stay outside the asar because the plugin spawns it as
+# a real file, and the plugin looks for it under process.resourcesPath.
+extraResources:
+  - from: resources/workbuddy-token.py
+    to: workbuddy-token.py
+  - from: resources/workbuddy-token.ps1
+    to: workbuddy-token.ps1
 asar: true
 npmRebuild: false
 electronDist: node_modules/electron/dist

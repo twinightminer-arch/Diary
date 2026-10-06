@@ -17,7 +17,9 @@ export type Request = {
   apiKey?: string;
   /** Background / wallpaper plugin. */
   kind?: string; folder?: string; fit?: string; dim?: number; blur?: number;
-  path?: string; title?: string; animated?: boolean;
+  /** Wallpaper transparency (0 = original quality) and brightness in percent. */
+  opacity?: number; brightness?: number;
+  path?: string; title?: string; animated?: boolean; file?: string;
   /** Plugin manager + permission switches. */
   pluginId?: string; enabled?: boolean; network?: boolean; location?: boolean;
   mode?: string; label?: string;
@@ -124,7 +126,7 @@ function mobileConfig() {
   const current = account.session.userId ? account.users.find(u => u.id === account.session.userId) ?? null : null;
   return {
     activeProvider: settings.activeProvider,
-    providers: Object.entries(providers).map(([id, entry]) => ({ id, baseUrl: entry.baseUrl, model: entry.model, hasKey: Boolean(settings.keys[id]) })),
+    providers: Object.entries(providers).map(([id, entry]) => ({ id, baseUrl: entry.baseUrl, model: entry.model, hasKey: Boolean(settings.keys[id]), needsKey: true })),
     profile: load<{ username: string; avatar: string | null; signature: string }>('profile', { username: '', avatar: null, signature: '' }),
     media: load<{ background: string | null; bgm: string | null }>('media', { background: null, bgm: null }),
     users: account.users.map(u => ({

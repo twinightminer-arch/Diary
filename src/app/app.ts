@@ -11,7 +11,7 @@ import type { WeatherOk, WeatherReport } from './weather.ts';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const title = $<HTMLInputElement>('title'), editor = $<HTMLTextAreaElement>('editor');
-let current: Entry | null = null, password: string | undefined, dirty = false, draft = false, busy = false;
+let current: Entry | null = null, password: string | undefined, dirty = false, draft = false, busy = false, busySince = 0;
 let entries: (EntrySummary & { title: string; snippet: string })[] = [];
 let toastTimer: ReturnType<typeof setTimeout>;
 let unlocked = true;
@@ -61,8 +61,13 @@ function action(operation: () => Promise<unknown>) {
   return async () => {
     // Never swallow a click silently: an in-flight operation used to make every
     // later button appear dead, which is indistinguishable from a crash.
-    if (busy) { toast('请稍等，上一个操作还在进行中…'); return; }
-    busy = true;
+    if (busy) {
+      // A wedged operation must not brick the UI. Past 30s we let the user try
+      // again instead of answering every click with the same toast forever.
+      if (Date.now() - busySince < 30_000) { toast('请稍等，上一个操作还在进行中…'); return; }
+      busy = false;
+    }
+    busy = true; busySince = Date.now();
     try { await operation(); } catch (error) { toast(localizedError(error)); }
     finally { busy = false; }
   };
@@ -194,21 +199,35 @@ function view(preview: boolean) {
 // ---------- Lock screen & accounts (QQ-style) ----------
 type AccountSummary = { id: string; username: string; displayName: string; avatar: string | null; googleEmail: string | null; autoLogin: boolean; hasRecovery: boolean };
 type BackgroundState = {
-  kind: 'image' | 'video' | 'wallpaper' | null;
+  kind: 'image' | 'video' | 'wallpaper' | 'file' | null;
   media: string | null;
+  file: string | null;
   wallpaper: { path: string; title: string; animated: boolean } | null;
   fit: 'cover' | 'contain' | 'tile' | 'center';
   dim: number; blur: number;
+  /** 0 = 原画质（完全不透明）；100 = 完全透明。 */
+  opacity: number;
+  /** 100 = 素材本来的亮度。 */
+  brightness: number;
+};
+/** One file inside <vault>/backgrounds or <vault>/music. */
+type LibraryItem = { name: string; size: number; mime: string; modified: number };
+/** Used when a snapshot carries no background at all (the Android shell). */
+const NO_BACKGROUND: BackgroundState = {
+  kind: null, media: null, file: null, wallpaper: null,
+  fit: 'cover', dim: 0, blur: 0, opacity: 0, brightness: 100,
 };
 type BuiltinPlugin = { id: string; name: string; description: string; version: string; kind: 'builtin'; enabled: boolean };
-type PluginList = {
-  builtin: BuiltinPlugin[];
-  external: { file: string; id: string; label: string; baseUrl: string; model: string; custom: boolean }[];
-  errors: { file: string; message: string }[];
-  directory: string;
+type PluginInfo = { file: string; id: string; label: string; baseUrl: string; model: string; custom: boolean; models: string[]; enabled: boolean };
+type PluginList = { builtin: BuiltinPlugin[]; external: PluginInfo[]; errors: { file: string; message: string }[]; directory: string };
+type ProviderInfo = {
+  id: string; label?: string; baseUrl: string; model: string; models: string[];
+  hasKey: boolean; needsKey?: boolean;
+  /** True for a backend the user registered by hand. */
+  custom?: boolean;
 };
 type Snapshot = {
-  activeProvider: string; providers: { id: string; baseUrl: string; model: string; hasKey: boolean }[];
+  activeProvider: string; providers: ProviderInfo[];
   profile: { username: string; avatar: string | null; signature: string };
   media: { background: BackgroundState; bgm: string | null };
   background: BackgroundState;
@@ -221,7 +240,7 @@ type Snapshot = {
   remember: boolean;
   google: { googleId: string; email: string; name: string; picture: string | null } | null;
   oauthClients: Record<string, string>;
-  plugins: { file: string; id: string; label: string; baseUrl: string; model: string; custom: boolean }[];
+  plugins: PluginInfo[];
   pluginErrors: { file: string; message: string }[];
   pluginDirectory: string;
 };
@@ -428,47 +447,159 @@ document.querySelectorAll<HTMLButtonElement>('[data-login-provider]').forEach(bu
   });
 });
 
-// ---------- Settings panel ----------
-/** Lists AI plugins discovered on disk, plus where to drop new ones. */
-function renderPlugins(cfg: Snapshot): void {
-  const host = $('aiPlugins');
-  host.hidden = false;
+// ---------- AI 模型（侧边栏独立入口，三页：API / 自定义 / WorkBuddy 插件） ----------
+/** Built-in OpenAI-compatible vendors. Matches DEFAULT_PROVIDERS on the host. */
+const VENDOR_PRESETS: { id: string; label: string; baseUrl: string; model: string }[] = [
+  { id: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+  { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+  { id: 'moonshot', label: 'Moonshot（月之暗面）', baseUrl: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k' },
+  { id: 'zhipu', label: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash' },
+  { id: 'siliconflow', label: '硅基流动 SiliconFlow', baseUrl: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct' },
+  { id: 'local', label: '本机自建网关', baseUrl: 'http://127.0.0.1:3000/v1', model: 'deepseek-v4-flash' },
+];
+
+/** Page 1 — the built-in OpenAI-compatible vendors. */
+function paintApiPage(cfg: Snapshot): void {
+  const sel = $<HTMLSelectElement>('aiVendor');
+  const active = cfg.providers.find(p => p.id === cfg.activeProvider);
+  // A plugin or a custom backend may be the active one; the vendor picker then
+  // simply shows the built-in table without claiming to be selected.
+  sel.replaceChildren();
+  for (const preset of VENDOR_PRESETS) {
+    const option = document.createElement('option');
+    option.value = preset.id;
+    option.textContent = preset.label;
+    sel.append(option);
+  }
+  const current = cfg.providers.find(p => p.id === sel.value) ?? cfg.providers[0];
+  const paint = () => {
+    const entry = cfg.providers.find(p => p.id === sel.value);
+    $<HTMLInputElement>('aiApiBase').value = entry?.baseUrl ?? '';
+    $<HTMLInputElement>('aiApiModel').value = entry?.model ?? '';
+    $<HTMLInputElement>('aiApiKey').value = '';
+  };
+  sel.value = VENDOR_PRESETS.some(p => p.id === cfg.activeProvider) ? cfg.activeProvider : VENDOR_PRESETS[0]!.id;
+  sel.onchange = paint;
+  paint();
+  $('aiApiState').textContent = active
+    ? `当前启用：${active.label ?? active.id} · ${active.model || '未指定模型'}${active.hasKey ? ' · 已保存密钥' : ' · 未填密钥'}`
+    : '当前没有启用任何模型。';
+}
+
+/** Page 2 — backends the user registered by hand. */
+function paintCustomPage(cfg: Snapshot): void {
+  const host = $('aiCustomList');
   host.replaceChildren();
-  const title = document.createElement('strong');
-  title.textContent = cfg.plugins.length ? `已加载 ${cfg.plugins.length} 个 AI 插件` : 'AI 插件';
-  host.append(title);
-  for (const plugin of cfg.plugins) {
-    const row = document.createElement('div');
-    row.className = 'ai-plugin-row';
-    const name = document.createElement('b'); name.textContent = plugin.label;
-    const code = document.createElement('code'); code.textContent = plugin.id;
-    const note = document.createElement('small');
-    note.textContent = plugin.custom ? '自定义传输' : plugin.baseUrl || '未设置服务地址';
-    row.append(name, code, note);
-    host.append(row);
+  const customs = cfg.providers.filter(p => p.custom);
+  if (!customs.length) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = '还没有自定义模型。在下面登记一个，它就会出现在 AI 问答与 AI 搜索的可用后端里。';
+    host.append(empty);
+  }
+  for (const entry of customs) {
+    const active = entry.id === cfg.activeProvider;
+    host.append(pluginRow(
+      entry.label ?? entry.id,
+      `${entry.baseUrl || '未填地址'} · ${entry.model || '未指定模型'}　id: ${entry.id}`,
+      active ? '使用中' : '已保存',
+      active ? 'on' : 'off',
+      {
+        label: active ? '已启用' : '启用',
+        run: () => { void (async () => {
+          await call({ op: 'config:setProvider', id: entry.id, baseUrl: entry.baseUrl, model: entry.model });
+          await loadConfig();
+          await openAiModels();
+          toast(`已启用「${entry.label ?? entry.id}」`);
+        })(); },
+      },
+    ));
+    // Deleting lives next to the entry it removes, not in a separate screen.
+    const remove = document.createElement('button');
+    remove.className = 'text-button danger-text';
+    remove.textContent = '删除';
+    remove.onclick = () => { void (async () => {
+      await call({ op: 'provider:delete', id: entry.id });
+      await loadConfig();
+      await openAiModels();
+      toast(`已删除「${entry.label ?? entry.id}」`);
+    })(); };
+    host.lastElementChild?.append(remove);
+  }
+  $('aiCustomHint').textContent = '名称只能用字母、数字、点、下划线和连字符，它会作为这个模型的唯一标识。';
+}
+
+/** Page 3 — the WorkBuddy plugin, which owns its own transport. */
+function paintWorkbuddyPage(cfg: Snapshot): void {
+  const host = $('aiWbPluginList');
+  host.replaceChildren();
+  const plugins = cfg.plugins;
+  if (!plugins.length) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = '没有发现 WorkBuddy 插件。把 workbuddy.mjs 放进插件目录并重启 Diary，它会出现在这里。';
+    host.append(empty);
+  }
+  for (const plugin of plugins) {
+    host.append(pluginRow(
+      plugin.label,
+      `${plugin.custom ? '自带传输层（无需 API Key）' : plugin.baseUrl || '未设置服务地址'}　id: ${plugin.id}`,
+      plugin.enabled ? '已启用' : '已停用',
+      plugin.enabled ? 'on' : 'off',
+      {
+        label: plugin.enabled ? '停用' : '启用',
+        run: () => { void (async () => {
+          await call({ op: 'plugin:toggle', pluginId: plugin.id, enabled: !plugin.enabled });
+          await loadConfig();
+          await openAiModels();
+          toast(`${plugin.label}已${plugin.enabled ? '停用' : '启用'}`);
+        })(); },
+      },
+    ));
   }
   for (const problem of cfg.pluginErrors) {
-    const row = document.createElement('div');
-    row.className = 'ai-plugin-row bad';
-    row.textContent = `插件加载失败：${problem.file} — ${problem.message}`;
-    host.append(row);
+    host.append(pluginRow(problem.file.split(/[\\/]/).pop() ?? problem.file, problem.message, '加载失败', 'bad'));
   }
-  const hint = document.createElement('p');
-  hint.className = 'hint';
-  hint.textContent = '把 .mjs 插件放进 Diary 数据目录的 plugins 文件夹，重启后即会出现在上方并可被选中。';
-  host.append(hint);
+  // Models come from the plugin itself, prefixed `workbuddy/` so the same name
+  // never means two different things on screen.
+  const catalogue = plugins.flatMap(plugin => plugin.models ?? []);
+  const sel = $<HTMLSelectElement>('aiWbModel');
+  sel.replaceChildren();
+  for (const model of [...new Set(catalogue)]) {
+    const option = document.createElement('option');
+    option.value = model;
+    option.textContent = model;
+    sel.append(option);
+  }
+  const wb = cfg.providers.find(p => p.id === 'workbuddy');
+  if (wb?.model && !catalogue.includes(wb.model)) {
+    const option = document.createElement('option');
+    option.value = wb.model; option.textContent = wb.model; sel.append(option);
+  }
+  sel.value = wb?.model ?? catalogue[0] ?? '';
+  sel.disabled = !catalogue.length;
+  $('aiWbNote').textContent = catalogue.length
+    ? '模型的写法统一为 workbuddy/<型号>；切换后点「保存并启用」。'
+    : '插件没有提供模型列表，先启用上面的插件。';
+  const active = cfg.providers.find(p => p.id === cfg.activeProvider);
+  $('aiWbState').textContent = active?.id === 'workbuddy'
+    ? `当前启用：${active.label ?? 'WorkBuddy'} · ${active.model || '未指定模型'}`
+    : '当前启用的不是 WorkBuddy 插件，点「保存并启用」即可切换过来。';
+}
+
+/** Opens the standalone AI-model screen and paints the visible page. */
+async function openAiModels(): Promise<void> {
+  const cfg = await call<Snapshot>({ op: 'config:get' });
+  lastSnapshot = cfg;
+  paintApiPage(cfg);
+  paintCustomPage(cfg);
+  paintWorkbuddyPage(cfg);
+  $('aiModelPanel').hidden = false;
 }
 
 async function loadConfig() {
   const cfg = await call<Snapshot>({ op: 'config:get' });
   lastSnapshot = cfg;
-  const sel = $<HTMLSelectElement>('cfgProvider'); sel.replaceChildren();
-  for (const p of cfg.providers) { const opt = document.createElement('option'); opt.value = p.id; opt.textContent = `${p.id} · ${p.model || p.baseUrl}`; sel.append(opt); }
-  sel.value = cfg.activeProvider;
-  $<HTMLInputElement>('cfgBaseUrl').value = cfg.providers.find(p => p.id === cfg.activeProvider)?.baseUrl ?? '';
-  $<HTMLInputElement>('cfgModel').value = cfg.providers.find(p => p.id === cfg.activeProvider)?.model ?? '';
-  $<HTMLInputElement>('cfgApiKey').value = '';
-  renderPlugins(cfg);
   $<HTMLInputElement>('profileUsername').value = cfg.profile.username;
   $<HTMLInputElement>('profileSignature').value = cfg.profile.signature;
   // The signed-in account is the source of truth for every avatar & name slot.
@@ -484,9 +615,18 @@ async function loadConfig() {
   const avatarUrl = await resolveAvatar(cfg.currentUser?.avatar ?? cfg.profile.avatar);
   setAvatar($<HTMLImageElement>('avatarImg'), $('userAvatar'), avatarUrl, displayName);
   setAvatar($<HTMLImageElement>('profileAvatarPreview'), $('profileAvatarInitial'), avatarUrl, displayName);
-  applyBackground(cfg.background);
-  applyBgm(cfg.media);
-  renderBackgroundPanel(cfg.background);
+  // Folder contents come from their own ops so the snapshot stays synchronous
+  // and cheap; the two listings are independent and can run together.
+  const [backgroundLibrary, musicLibrary] = await Promise.all([
+    call<LibraryItem[]>({ op: 'background:list' }),
+    call<LibraryItem[]>({ op: 'music:list' }),
+  ]);
+  // Android's snapshot has no background field; never dereference undefined.
+  const background = cfg.background ?? NO_BACKGROUND;
+  applyBackground(background);
+  applyMusic(musicLibrary, cfg.media?.bgm ?? null);
+  renderBackgroundPanel(background);
+  renderBackgroundLibrary(backgroundLibrary, background);
   renderPermissionState(cfg);
   applyPluginVisibility(cfg);
   await renderGallery();
@@ -528,7 +668,7 @@ function applyPluginVisibility(cfg: Snapshot): void {
     if (mediaTab?.classList.contains('active')) {
       $('settingsPanel').querySelectorAll<HTMLElement>('.settings-tabs button').forEach(button => { if (!button.hidden) button.click(); });
     }
-    applyBackground({ kind: null, media: null, wallpaper: null, fit: 'cover', dim: 0, blur: 0 });
+    applyBackground(structuredClone(NO_BACKGROUND));
   }
 
   // Never strand the user on a screen whose entry point just vanished.
@@ -546,8 +686,28 @@ function toToken(absolutePath: string): string {
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
 }
 /** Imported media and wallpaper files are streamed, never inlined as base64. */
-function schemeUrl(kind: 'media' | 'wallpaper', token: string): string {
+function schemeUrl(kind: 'media' | 'wallpaper' | 'bg' | 'music', token: string): string {
   return `diary-wallpaper://${kind}/${token}`;
+}
+/**
+ * Stream URL for whatever the saved background points at. Three sources are
+ * possible: a file in <vault>/backgrounds, a Wallpaper Engine project, or a
+ * legacy <vault>/media id written by an older build.
+ */
+function backgroundUrl(bg: BackgroundState): string | null {
+  if (bg.kind === 'file') return bg.file ? schemeUrl('bg', encodeURIComponent(bg.file)) : null;
+  if (bg.kind === 'wallpaper') return bg.wallpaper?.path ? schemeUrl('wallpaper', toToken(bg.wallpaper.path)) : null;
+  return bg.media ? schemeUrl('media', bg.media) : null;
+}
+/** The path or name behind the background, used to tell a still from a clip. */
+function backgroundSourceName(bg: BackgroundState): string {
+  if (bg.kind === 'file') return bg.file ?? '';
+  if (bg.kind === 'wallpaper') return bg.wallpaper?.path ?? '';
+  return bg.media ?? '';
+}
+/** Music is always addressed by file name inside <vault>/music. */
+function musicUrl(name: string): string {
+  return schemeUrl('music', encodeURIComponent(name));
 }
 
 let backgroundRun = 0;
@@ -557,22 +717,32 @@ let backgroundRun = 0;
  */
 function applyBackground(bg: BackgroundState): void {
   const run = ++backgroundRun;
-  const image = $('bgImage'), video = $<HTMLVideoElement>('bgVideo'), dim = $('bgDimLayer');
+  const image = $('bgImage'), video = $<HTMLVideoElement>('bgVideo'), dim = $('bgDimLayer'), veil = $('bgVeilLayer');
   video.pause(); video.removeAttribute('src'); video.hidden = true;
   image.hidden = true; image.style.backgroundImage = '';
   dim.hidden = true; dim.style.opacity = '0';
+  veil.hidden = true; veil.style.opacity = '0';
   document.body.classList.remove('has-bg');
   document.documentElement.style.setProperty('--bg-blur', '0px');
+  document.documentElement.style.setProperty('--bg-brightness', '1');
+  document.documentElement.style.setProperty('--bg-fade', '0');
   if (!bg.kind) return;
 
-  const source = bg.kind === 'wallpaper' ? (bg.wallpaper?.path ?? '') : (bg.media ?? '');
-  if (!source) return;
-  const url = bg.kind === 'wallpaper' ? schemeUrl('wallpaper', toToken(source)) : schemeUrl('media', source);
+  const source = backgroundSourceName(bg);
+  const url = backgroundUrl(bg);
+  if (!source || !url) return;
   const isVideo = VIDEO_FILE.test(source);
 
+  // 透明度 0 = 原画质：既不动素材本身的透明度，也不盖任何白纱。
+  const fade = Math.min(1, Math.max(0, (bg.opacity ?? 0) / 100));
+  const brightness = Math.min(150, Math.max(50, bg.brightness ?? 100)) / 100;
   document.documentElement.style.setProperty('--bg-blur', `${Math.max(0, bg.blur)}px`);
+  document.documentElement.style.setProperty('--bg-brightness', String(brightness));
+  document.documentElement.style.setProperty('--bg-fade', String(fade));
   dim.hidden = false;
   dim.style.opacity = String(Math.min(1, Math.max(0, bg.dim)));
+  veil.hidden = false;
+  veil.style.opacity = String(fade * 0.55);
   document.body.classList.add('has-bg');
   if (run !== backgroundRun) return;
 
@@ -591,35 +761,151 @@ function applyBackground(bg: BackgroundState): void {
   image.hidden = false;
 }
 
-/** The background music track lives outside the wallpaper plugin on purpose. */
-function applyBgm(media: { bgm: string | null }): void {
+// ---------- Background music: one folder, played in order, then looped ----------
+type Track = { name: string; url: string };
+let playlist: Track[] = [];
+let trackIndex = 0;
+/** The user's intent. Track changes must never override it. */
+let musicWanted = false;
+
+function paintMusicButton(): void {
+  const button = $('musicToggle');
   const player = $<HTMLAudioElement>('bgmPlayer');
-  if (media.bgm) {
-    call<string>({ op: 'media:data', id: media.bgm })
-      .then(url => { player.src = url; void player.play().catch(() => undefined); })
-      .catch(() => undefined);
-  } else { player.pause(); player.removeAttribute('src'); }
+  const playing = !player.paused && !player.ended && Boolean(player.getAttribute('src'));
+  button.classList.toggle('playing', playing);
+  const label = playing ? '暂停背景音乐' : '播放背景音乐';
+  button.title = label;
+  button.setAttribute('aria-label', label);
+}
+/** Loads a track by index, wrapping around so the folder loops forever. */
+function playTrack(index: number): void {
+  const player = $<HTMLAudioElement>('bgmPlayer');
+  if (!playlist.length) { player.pause(); player.removeAttribute('src'); paintMusicButton(); return; }
+  trackIndex = ((index % playlist.length) + playlist.length) % playlist.length;
+  player.src = playlist[trackIndex]!.url;
+  void player.play().catch(() => undefined);
+  paintMusicButton();
+}
+function toggleMusic(): void {
+  const player = $<HTMLAudioElement>('bgmPlayer');
+  if (!playlist.length) { toast('还没有音乐，先在「设置 → 壁纸与背景 → 背景音乐」导入'); return; }
+  if (player.paused) {
+    musicWanted = true;
+    if (player.getAttribute('src')) void player.play().catch(() => undefined);
+    else playTrack(trackIndex);
+  } else { musicWanted = false; player.pause(); }
+  paintMusicButton();
 }
 
+function renderMusicLibrary(items: LibraryItem[]): void {
+  const grid = $('bgMusicGrid');
+  grid.replaceChildren();
+  const tracks = items.filter(item => item.mime.startsWith('audio/'));
+  if (!tracks.length) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = '音乐文件夹还是空的。点「导入音乐…」添加音频，之后会按文件名顺序循环播放。';
+    grid.append(empty);
+    return;
+  }
+  for (const item of tracks) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = `wallpaper-card${playlist[trackIndex]?.name === item.name ? ' active' : ''}`;
+    card.title = item.name;
+    const thumb = document.createElement('span');
+    thumb.className = 'wallpaper-thumb music-thumb';
+    thumb.textContent = '♪';
+    const name = document.createElement('b');
+    name.textContent = item.name;
+    const meta = document.createElement('small');
+    meta.textContent = `${Math.max(1, Math.round(item.size / 1024))} KB`;
+    const remove = document.createElement('span');
+    remove.className = 'wp-remove';
+    remove.textContent = '×';
+    remove.title = '从音乐文件夹删除';
+    remove.onclick = (event: MouseEvent) => {
+      event.stopPropagation();
+      void action(async () => {
+        await call({ op: 'music:remove', name: item.name });
+        await loadConfig();
+        toast(`已删除「${item.name}」`);
+      })();
+    };
+    card.append(thumb, name, meta, remove);
+    card.onclick = action(async () => {
+      musicWanted = true;
+      const index = playlist.findIndex(track => track.name === item.name);
+      playTrack(index < 0 ? 0 : index);
+    });
+    grid.append(card);
+  }
+}
+
+/** Rebuilds the playlist from the folder and keeps the player honest. */
+function applyMusic(items: LibraryItem[], legacyBgm: string | null): void {
+  const tracks = items.filter(item => item.mime.startsWith('audio/'));
+  const previous = playlist[trackIndex]?.name ?? '';
+  playlist = tracks.length
+    ? tracks.map(item => ({ name: item.name, url: musicUrl(item.name) }))
+    // A track configured before this folder existed keeps working.
+    : (legacyBgm ? [{ name: 'BGM', url: schemeUrl('media', legacyBgm) }] : []);
+  // Deleting the track that was playing must not leave a dangling index.
+  const keep = playlist.findIndex(track => track.name === previous);
+  trackIndex = keep >= 0 ? keep : 0;
+  const player = $<HTMLAudioElement>('bgmPlayer');
+  if (!playlist.length) { player.pause(); player.removeAttribute('src'); }
+  else if (musicWanted && !player.getAttribute('src')) playTrack(trackIndex);
+  renderMusicLibrary(items);
+  paintMusicButton();
+}
+
+$('musicToggle').onclick = () => toggleMusic();
+$('bgmImport').onclick = action(async () => {
+  const result = await call<{ canceled: boolean; items: LibraryItem[] }>({ op: 'music:import' });
+  if (result.canceled || !result.items.length) return;
+  await loadConfig();
+  toast(`已导入 ${result.items.length} 首音乐，将按顺序循环播放`);
+});
+$('bgmOpen').onclick = action(async () => { await call({ op: 'music:openFolder' }); });
+// Sequential playback. A `loop` attribute on the <audio> element would repeat
+// one file forever and never fire `ended` — which is exactly why the folder
+// could not advance before.
+$('bgmPlayer').onended = () => { if (playlist.length) playTrack(trackIndex + 1); };
+$('bgmPlayer').onplay = paintMusicButton;
+$('bgmPlayer').onpause = paintMusicButton;
+
 /** Reflects the saved background in the settings preview card and its controls. */
+/** The library scan is slow (registry + Steam libraries), so it runs once. */
+let wallpapersLoaded = false;
 function renderBackgroundPanel(bg: BackgroundState): void {
   const still = $<HTMLElement>('bgPreviewImage'), clip = $<HTMLVideoElement>('bgPreviewVideo');
   const empty = $('bgPreviewEmpty'), label = $('bgPreviewLabel');
   still.hidden = true; still.style.backgroundImage = '';
   clip.pause(); clip.removeAttribute('src'); clip.hidden = true;
-  const source = bg.kind === 'wallpaper' ? (bg.wallpaper?.path ?? '') : (bg.media ?? '');
-  label.textContent = bg.kind === 'wallpaper' ? `Wallpaper · ${bg.wallpaper?.title ?? ''}` : bg.kind === 'video' ? '本地视频' : bg.kind === 'image' ? '本地图片／动图' : '';
+  const source = backgroundSourceName(bg);
+  const url = backgroundUrl(bg);
+  label.textContent = bg.kind === 'wallpaper' ? `Wallpaper · ${bg.wallpaper?.title ?? ''}`
+    : bg.kind === 'file' ? `背景库 · ${bg.file ?? ''}`
+      : bg.kind === 'video' ? '本地视频'
+        : bg.kind === 'image' ? '本地图片／动图' : '';
   empty.hidden = Boolean(bg.kind);
-  if (source) {
-    const url = bg.kind === 'wallpaper' ? schemeUrl('wallpaper', toToken(source)) : schemeUrl('media', source);
+  if (source && url) {
     if (VIDEO_FILE.test(source)) { clip.src = url; clip.hidden = false; void clip.play().catch(() => undefined); }
     else { still.style.backgroundImage = `url("${url}")`; still.hidden = false; }
   }
   ($('bgFit') as HTMLSelectElement).value = bg.fit;
   ($('bgDim') as HTMLInputElement).value = String(Math.round(bg.dim * 100));
   ($('bgBlur') as HTMLInputElement).value = String(Math.round(bg.blur));
+  ($('bgOpacity') as HTMLInputElement).value = String(Math.round(bg.opacity ?? 0));
+  ($('bgBrightness') as HTMLInputElement).value = String(Math.round(bg.brightness ?? 100));
   $('bgDimValue').textContent = `${Math.round(bg.dim * 100)}%`;
   $('bgBlurValue').textContent = `${Math.round(bg.blur)}px`;
+  $('bgOpacityValue').textContent = `${Math.round(bg.opacity ?? 0)}%`;
+  $('bgBrightnessValue').textContent = `${Math.round(bg.brightness ?? 100)}%`;
+  // The library is listed right there, so it fills itself in on first view;
+  // "重新扫描" and "选择目录…" force a fresh pass afterwards.
+  if (!wallpapersLoaded) { wallpapersLoaded = true; void loadWallpapers(); }
 }
 /** Renders the imported-media gallery: click a tile to insert it, × to delete it. */
 async function renderGallery() {
@@ -662,25 +948,33 @@ async function renderGallery() {
 function openSettings() { $('settingsPanel').hidden = false; }
 $('settings').onclick = action(async () => { await loadConfig(); openSettings(); });
 $('settingsClose').onclick = () => { $('settingsPanel').hidden = true; };
-document.querySelectorAll<HTMLButtonElement>('.settings-tabs button').forEach(button => {
+// Scoped to the settings panel: the AI-model screen owns its own tabs.
+{
+  const panel = $('settingsPanel');
+  panel.querySelectorAll<HTMLButtonElement>('.settings-tabs button').forEach(button => {
+    button.onclick = () => {
+      panel.querySelectorAll('.settings-tabs button').forEach(b => b.classList.remove('active'));
+      button.classList.add('active');
+      const tab = button.dataset.tab!;
+      panel.querySelectorAll<HTMLElement>('[data-tabpanel]').forEach(p => { p.hidden = p.dataset.tabpanel !== tab; });
+    };
+  });
+}
+// ---- AI model screen (standalone entry in the sidebar) ----
+$('aiModels').onclick = action(async () => { await openAiModels(); });
+$('aiModelClose').onclick = () => { $('aiModelPanel').hidden = true; };
+$('aiModelTabs').querySelectorAll<HTMLButtonElement>('button').forEach(button => {
   button.onclick = () => {
-    document.querySelectorAll('.settings-tabs button').forEach(b => b.classList.remove('active'));
+    $('aiModelTabs').querySelectorAll('button').forEach(b => b.classList.remove('active'));
     button.classList.add('active');
-    const tab = button.dataset.tab!;
-    document.querySelectorAll<HTMLElement>('[data-tabpanel]').forEach(p => { p.hidden = p.dataset.tabpanel !== tab; });
+    const tab = button.dataset.aiTab!;
+    document.querySelectorAll<HTMLElement>('[data-ai-panel]').forEach(p => { p.hidden = p.dataset.aiPanel !== tab; });
   };
 });
-$('cfgSave').onclick = action(async () => {
-  const id = $<HTMLSelectElement>('cfgProvider').value;
-  const key = $<HTMLInputElement>('cfgApiKey').value;
-  await call({ op: 'config:setProvider', id, baseUrl: $<HTMLInputElement>('cfgBaseUrl').value, model: $<HTMLInputElement>('cfgModel').value, ...(key ? { next: key } : {}) });
-  await loadConfig();
-  toast(t('done'));
-});
-// A dead end with no explanation is the worst outcome, so the panel can prove
+// A dead end with no explanation is the worst outcome, so either page can prove
 // the backend really answers instead of leaving the user to guess.
-$('cfgTest').onclick = action(async () => {
-  const out = $('cfgTestResult');
+async function runProbe(outId: string): Promise<void> {
+  const out = $(outId);
   out.className = 'ai-status pending';
   out.textContent = '正在测试，请稍候…';
   const result = await call<{ ok: boolean; ms: number; provider: string; model: string; detail: string }>({ op: 'agent:probe' });
@@ -688,7 +982,42 @@ $('cfgTest').onclick = action(async () => {
   out.textContent = result.ok
     ? `✓ ${result.provider} · ${result.model} · ${result.ms} ms · 回复「${result.detail}」`
     : `✗ ${result.provider} · ${result.model}：${result.detail}`;
+}
+$('aiApiSave').onclick = action(async () => {
+  const id = $<HTMLSelectElement>('aiVendor').value;
+  const key = $<HTMLInputElement>('aiApiKey').value;
+  await call({ op: 'config:setProvider', id, baseUrl: $<HTMLInputElement>('aiApiBase').value, model: $<HTMLInputElement>('aiApiModel').value, ...(key ? { next: key } : {}) });
+  await loadConfig();
+  await openAiModels();
+  toast('已保存并启用');
 });
+$('aiApiTest').onclick = action(async () => { await runProbe('aiApiTestResult'); });
+$('aiCustomAdd').onclick = action(async () => {
+  const id = $<HTMLInputElement>('aiCustomName').value.trim();
+  if (!id) { toast('请先填写名称'); return; }
+  const key = $<HTMLInputElement>('aiCustomKey').value;
+  await call({
+    op: 'provider:create', id,
+    label: $<HTMLInputElement>('aiCustomLabel').value.trim(),
+    baseUrl: $<HTMLInputElement>('aiCustomBase').value.trim(),
+    model: $<HTMLInputElement>('aiCustomModel').value.trim(),
+    ...(key ? { next: key } : {}),
+  });
+  for (const field of ['aiCustomName', 'aiCustomLabel', 'aiCustomBase', 'aiCustomModel', 'aiCustomKey']) $<HTMLInputElement>(field).value = '';
+  await loadConfig();
+  await openAiModels();
+  toast(`已添加「${id}」并启用`);
+});
+$('aiWbSave').onclick = action(async () => {
+  // Enabling the plugin and picking it as the active backend is one decision
+  // here, so a user who just wants WorkBuddy to answer only clicks once.
+  await call({ op: 'plugin:toggle', pluginId: 'workbuddy', enabled: true });
+  await call({ op: 'config:setProvider', id: 'workbuddy', model: $<HTMLSelectElement>('aiWbModel').value });
+  await loadConfig();
+  await openAiModels();
+  toast('已启用 WorkBuddy 插件');
+});
+$('aiWbTest').onclick = action(async () => { await runProbe('aiWbTestResult'); });
 $('cfgLocale').onchange = () => { locale.setLocale($<HTMLSelectElement>('cfgLocale').value); localStorage.setItem('diary.locale', locale.locale); translate(); };
 $('accountChangePwd').onclick = action(async () => {
   const r = await modal('修改密码', '输入原密码后设置新密码。', [
@@ -789,10 +1118,30 @@ $('googleFinish').onclick = action(async () => {
 });
 
 // ---------- Profile avatar ----------
+/**
+ * OS picker for what still needs raw bytes (avatars, diary illustrations).
+ * The cancel path is load-bearing: Chromium fires no `change` event when the
+ * user dismisses the dialog, so the old version left this promise pending
+ * forever — and the global busy flag, and therefore every button in the app,
+ * stuck behind it.
+ */
 function pickFile(accept: string): Promise<File | null> {
   return new Promise(resolve => {
     const input = document.createElement('input'); input.type = 'file'; input.accept = accept;
-    input.onchange = () => resolve(input.files?.[0] ?? null);
+    let settled = false;
+    const finish = (file: File | null) => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener('focus', onFocus);
+      input.remove();
+      resolve(file);
+    };
+    // The window regains focus right after the dialog closes either way; the
+    // delay lets a genuine selection win the race.
+    const onFocus = () => { setTimeout(() => finish(null), 600); };
+    input.onchange = () => finish(input.files?.[0] ?? null);
+    input.addEventListener('cancel', () => finish(null));
+    window.addEventListener('focus', onFocus, { once: true });
     input.click();
   });
 }
@@ -837,47 +1186,119 @@ type WallpaperEntry = {
   media: string | null; preview: string | null; animated: boolean; note: string;
 };
 
-async function importBackground(kind: 'image' | 'video'): Promise<void> {
-  const accept = kind === 'video'
-    ? 'video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov'
-    : 'image/png,image/jpeg,image/webp,image/gif,image/svg+xml,image/avif';
-  const file = await pickFile(accept);
-  if (!file) return;
-  const { data, mime } = await fileToBase64(file);
-  const info = await call<{ id: string }>({ op: 'media:import', name: file.name, mime, data });
-  await call({ op: 'background:set', kind, id: info.id });
+/**
+ * Imports through the OS dialog and copies straight into <vault>/backgrounds.
+ * The in-page <input type=file> path is gone for good: it could not report a
+ * cancel, so its promise never settled, the global busy flag stayed set and
+ * every later button answered "上一个操作还在进行中" — the "点不动" report.
+ */
+async function importBackgroundFiles(kind?: 'image' | 'video'): Promise<void> {
+  const result = await call<{ canceled: boolean; items: LibraryItem[] }>({ op: 'background:import', ...(kind ? { kind } : {}) });
+  if (result.canceled || !result.items.length) return;
+  await call({ op: 'background:set', file: result.items[0]!.name });
   await loadConfig();
-  toast(kind === 'video' ? '视频背景已应用' : '背景已应用');
+  toast(result.items.length > 1
+    ? `已导入 ${result.items.length} 个文件，当前使用「${result.items[0]!.name}」`
+    : `已应用背景：${result.items[0]!.name}`);
 }
-$('bgPickImage').onclick = action(() => importBackground('image'));
-$('bgPickGif').onclick = action(() => importBackground('image'));
-$('bgPickVideo').onclick = action(() => importBackground('video'));
+$('bgPickImage').onclick = action(() => importBackgroundFiles('image'));
+$('bgPickGif').onclick = action(() => importBackgroundFiles('image'));
+$('bgPickVideo').onclick = action(() => importBackgroundFiles('video'));
+$('bgFolderImport').onclick = action(() => importBackgroundFiles());
+$('bgFolderOpen').onclick = action(async () => { await call({ op: 'background:openFolder' }); });
 $('bgClear').onclick = action(async () => {
   await call({ op: 'background:clear' });
   await loadConfig();
   toast('已清除背景');
 });
+
+/** The background folder itself, rendered as pickable tiles. */
+function renderBackgroundLibrary(items: LibraryItem[], active: BackgroundState): void {
+  const grid = $('bgFolderGrid');
+  grid.replaceChildren();
+  $('bgFolderState').textContent = items.length ? `${items.length} 个文件` : '';
+  if (!items.length) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = '背景库还是空的。点「导入文件…」添加图片、动图或视频，也可以直接把文件复制进背景库文件夹。';
+    grid.append(empty);
+    return;
+  }
+  for (const item of items) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = `wallpaper-card${active.kind === 'file' && active.file === item.name ? ' active' : ''}`;
+    card.title = `${item.name} · ${Math.max(1, Math.round(item.size / 1024))} KB`;
+    const thumb = document.createElement('span');
+    thumb.className = 'wallpaper-thumb';
+    const url = schemeUrl('bg', encodeURIComponent(item.name));
+    if (item.mime.startsWith('video/')) {
+      const clip = document.createElement('video');
+      clip.src = url; clip.muted = true; clip.loop = true; clip.autoplay = true; clip.playsInline = true;
+      thumb.append(clip);
+    } else {
+      thumb.style.backgroundImage = `url("${url}")`;
+    }
+    const name = document.createElement('b');
+    name.textContent = item.name;
+    const meta = document.createElement('small');
+    meta.textContent = `${item.mime.startsWith('video/') ? '视频' : '图片'} · ${Math.max(1, Math.round(item.size / 1024))} KB`;
+    const remove = document.createElement('span');
+    remove.className = 'wp-remove';
+    remove.textContent = '×';
+    remove.title = '从背景库删除';
+    remove.onclick = (event: MouseEvent) => {
+      event.stopPropagation();
+      void action(async () => {
+        await call({ op: 'background:remove', name: item.name });
+        await loadConfig();
+        toast(`已删除「${item.name}」`);
+      })();
+    };
+    card.append(thumb, name, meta, remove);
+    card.onclick = action(async () => {
+      await call({ op: 'background:set', file: item.name });
+      await loadConfig();
+      toast(`已应用背景：${item.name}`);
+    });
+    grid.append(card);
+  }
+}
 $('bgFit').onchange = action(async () => {
   await call({ op: 'background:set', fit: ($('bgFit') as HTMLSelectElement).value });
   await loadConfig();
 });
 
-/** Live preview while dragging; only the release persists. */
-function bindBackgroundSlider(id: 'bgDim' | 'bgBlur', labelId: string, unit: string): void {
+/**
+ * Live preview while dragging; only the release persists. `opacity` reads
+ * backwards from most sliders on purpose: 0 is the untouched original, so the
+ * preview keeps the clip at full strength until the user asks for less.
+ */
+function bindBackgroundSlider(id: 'bgDim' | 'bgBlur' | 'bgOpacity' | 'bgBrightness', labelId: string, unit: string): void {
   const input = $<HTMLInputElement>(id);
   input.oninput = () => {
     const value = Number(input.value);
     $(labelId).textContent = `${value}${unit}`;
     if (id === 'bgDim') $('bgDimLayer').style.opacity = String(value / 100);
-    else document.documentElement.style.setProperty('--bg-blur', `${value}px`);
+    else if (id === 'bgBlur') document.documentElement.style.setProperty('--bg-blur', `${value}px`);
+    else if (id === 'bgBrightness') document.documentElement.style.setProperty('--bg-brightness', String(value / 100));
+    else {
+      const fade = value / 100;
+      document.documentElement.style.setProperty('--bg-fade', String(fade));
+      $('bgVeilLayer').style.opacity = String(fade * 0.55);
+    }
   };
   input.onchange = action(async () => {
-    await call(id === 'bgDim'
-      ? { op: 'background:set', dim: Number(input.value) / 100 }
-      : { op: 'background:set', blur: Number(input.value) });
+    const value = Number(input.value);
+    await call(id === 'bgDim' ? { op: 'background:set', dim: value / 100 }
+      : id === 'bgBlur' ? { op: 'background:set', blur: value }
+        : id === 'bgBrightness' ? { op: 'background:set', brightness: value }
+          : { op: 'background:set', opacity: value });
     await loadConfig();
   });
 }
+bindBackgroundSlider('bgOpacity', 'bgOpacityValue', '%');
+bindBackgroundSlider('bgBrightness', 'bgBrightnessValue', '%');
 bindBackgroundSlider('bgDim', 'bgDimValue', '%');
 bindBackgroundSlider('bgBlur', 'bgBlurValue', 'px');
 
@@ -932,10 +1353,6 @@ async function loadWallpapers(): Promise<void> {
   $('bgLibraryState').textContent = `${scan.engines.length} 个目录 · ${scan.entries.length} 个壁纸`;
   $('bgLibraryHint').textContent = scan.hint || (scan.engines.length ? `扫描目录：${scan.engines.join(' · ')}` : '');
 }
-$('bgOpenLibrary').onclick = action(async () => {
-  $('bgLibrary').hidden = false;
-  await loadWallpapers();
-});
 $('bgLibraryRescan').onclick = action(loadWallpapers);
 $('bgLibraryPick').onclick = action(async () => {
   const result = await call<{ canceled: boolean; dir: string | null; engines: string[]; entries: WallpaperEntry[]; hint: string }>({ op: 'wallpaper:pick' });
@@ -945,19 +1362,6 @@ $('bgLibraryPick').onclick = action(async () => {
   $('bgLibraryState').textContent = `${result.engines.length} 个目录 · ${result.entries.length} 个壁纸`;
   $('bgLibraryHint').textContent = result.hint || `扫描目录：${result.engines.join(' · ')}`;
   toast(`已选择目录：${result.dir ?? ''}`);
-});
-
-$('bgmImport').onclick = action(async () => {
-  const id = await importMediaAs('audio/*,video/*');
-  if (!id) return;
-  await call({ op: 'media:setBgm', bgm: id });
-  await loadConfig();
-  toast(t('done'));
-});
-$('bgmClear').onclick = action(async () => {
-  await call({ op: 'media:setBgm', bgm: null });
-  $<HTMLAudioElement>('bgmPlayer').pause();
-  await loadConfig();
 });
 
 // ---------- Permissions & location ----------
@@ -1059,7 +1463,7 @@ async function openPluginManager(): Promise<void> {
   if (!list.external.length && !list.errors.length) {
     const empty = document.createElement('p');
     empty.className = 'hint';
-    empty.textContent = '还没有外部插件。把 .mjs 文件放进下面的插件目录，重启后它会出现在这里并可在设置 → AI 中选用。';
+    empty.textContent = '还没有外部插件。把 .mjs 文件放进下面的插件目录，重启后它会出现在侧边栏「AI 模型」里并可在那里启用。';
     externalHost.append(empty);
   }
   for (const plugin of list.external) {
@@ -1282,6 +1686,9 @@ function activateView(viewName: PortalViewName) {
   }
   document.querySelectorAll<HTMLButtonElement>('#primaryNav [data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === viewName));
   $('diarySidebar').hidden = viewName !== 'diary';
+  // The music button belongs to the portal screens; the diary editor has its
+  // own chrome and needs no floating control over the page.
+  $('musicToggle').hidden = viewName === 'diary';
   $('breadcrumbDate').textContent = viewTitles[viewName];
   document.body.classList.remove('sidebar-open');
   // Every portal screen renders itself from in-memory data, so opening a view

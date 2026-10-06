@@ -39,7 +39,14 @@ async function shot(name) {
 try {
   const page = await app.firstWindow();
   await page.locator('#lockScreen').waitFor({ state: 'visible', timeout: 20000 });
+  // Clicking before app.ts finished binding its handlers silently did nothing,
+  // which then looked like "the button is broken". Wait for the real signal.
+  await page.waitForFunction(() => Boolean(window.diary) && typeof document.getElementById('offlineCreate')?.onclick === 'function', null, { timeout: 30000 });
+  // The lock card still animates in; clicking a moving target misses it.
+  await page.waitForTimeout(1500);
   await page.locator('#offlineCreate').click();
+  // The dialog is a real <dialog>; filling before it opens races the boot.
+  await page.locator('[name=username]').waitFor({ state: 'visible', timeout: 20000 });
   await page.locator('[name=username]').fill('lizhonghao');
   await page.locator('[name=nickname]').fill('李忠浩');
   await page.locator('[name=next]').fill('diary-pass-123');
@@ -163,10 +170,10 @@ try {
   check('guide: route advances', await page.locator('.route-row.done').count() >= 1, `done=${await page.locator('.route-row.done').count()}`);
 
   // Guide search across all 24 affairs (case -> cases -> categories).
-  await page.locator('.guide-back button').first().click();
+  await page.locator('.guide-back button').first().click({ force: true });
   await page.waitForTimeout(350);
   check('guide: cases list reachable', await page.locator('.guide-list .guide-item').count() >= 1);
-  await page.locator('.guide-back button').first().click();
+  await page.locator('.guide-back button').first().click({ force: true });
   await page.waitForTimeout(400);
   await page.locator('.guide-toolbar .search-box input').fill('报修');
   await page.waitForTimeout(400);
@@ -216,7 +223,8 @@ try {
     (slots.overflow?.scroll?.[1] ?? 0) <= (slots.overflow?.client?.[1] ?? 0) + 2 && slots.stacked === false,
     JSON.stringify({ overflow: slots.overflow, stacked: slots.stacked }));
   await shot('portal-profile-avatar');
-  await page.locator('#settingsPanel .settings-tabs [data-tab="ai"]').click();
+  // AI settings used to live in 设置; they are their own sidebar entry now.
+  await page.locator('#settingsPanel .settings-tabs [data-tab="profile"]').click();
   await page.waitForTimeout(250);
 
   // ---------- plugin manager ----------
@@ -239,6 +247,30 @@ try {
     pluginPanel.external.join(' | ') || '(外部插件列表为空)');
   await page.locator('#pluginClose').click();
 
+  // ---------- the AI model screen: three pages, WorkBuddy keeps no secrets ----
+  await page.waitForTimeout(300);
+  await page.locator('#aiModels').click();
+  await page.waitForTimeout(700);
+  const aiScreen = await page.evaluate(() => ({
+    visible: !document.getElementById('aiModelPanel').hidden,
+    tabs: [...document.querySelectorAll('#aiModelTabs button')].map(button => button.textContent),
+    vendors: [...document.querySelectorAll('#aiVendor option')].map(option => option.textContent),
+    // The WorkBuddy page is the one that must never ask for an endpoint/key.
+    workbuddyHasKeyInput: document.querySelectorAll('[data-ai-panel="workbuddy"] input[type="password"]').length,
+    workbuddyNote: document.querySelector('[data-ai-panel="workbuddy"] .hint')?.textContent ?? '',
+  }));
+  check('ai models: a standalone sidebar entry opens with three pages',
+    aiScreen.visible === true && aiScreen.tabs.length === 3
+    && aiScreen.tabs.some(tab => /API/.test(tab))
+    && aiScreen.tabs.some(tab => /自定义/.test(tab))
+    && aiScreen.tabs.some(tab => /WorkBuddy/.test(tab)),
+    JSON.stringify(aiScreen.tabs));
+  check('ai models: the API page lists the built-in vendors', aiScreen.vendors.length >= 5, aiScreen.vendors.join(' / '));
+  check('ai models: WorkBuddy asks for no key and states WorkBuddy provides the AI',
+    aiScreen.workbuddyHasKeyInput === 0 && /WorkBuddy 提供/.test(aiScreen.workbuddyNote),
+    JSON.stringify({ inputs: aiScreen.workbuddyHasKeyInput, note: aiScreen.workbuddyNote.slice(0, 80) }));
+  await page.locator('#aiModelClose').click();
+
   // ---------- background & wallpaper plugin ----------
   await page.locator('#settings').click();
   await page.waitForTimeout(600);
@@ -248,9 +280,86 @@ try {
     sources: [...document.querySelectorAll('[data-tabpanel="media"] .bg-source')].map(element => element.querySelector('b')?.textContent),
     fit: Boolean(document.getElementById('bgFit')),
     library: Boolean(document.getElementById('bgLibrary')),
+    opacity: document.getElementById('bgOpacity')?.max,
+    brightness: document.getElementById('bgBrightness')?.value,
+    // The wallpaper must sit inside <main>, never behind the sidebar.
+    insideMain: Boolean(document.querySelector('main .bg-stage #bgImage')),
+    openLibraryGone: document.getElementById('bgOpenLibrary') === null,
   }));
-  check('background: four sources offered', background.sources.length === 4, background.sources.join(' / '));
+  check('background: three import sources offered (the redundant library card is gone)',
+    background.sources.length === 3 && background.openLibraryGone === true, background.sources.join(' / '));
   check('background: fit + library controls present', background.fit && background.library);
+  check('background: opacity goes to 100% and brightness defaults to 100 (original quality)',
+    background.opacity === '100' && background.brightness === '100', JSON.stringify(background));
+  check('background: the wallpaper is scoped to the work area, not the sidebar',
+    background.insideMain === true, String(background.insideMain));
+
+  // ---------- the background folder is its own library, pickable per file ----------
+  // Seed a real file so the whole disk -> folder -> background path is exercised.
+  const vault = resolve(home, 'journals');
+  await mkdir(resolve(vault, 'backgrounds'), { recursive: true });
+  await writeFile(resolve(vault, 'backgrounds', 'e2e-bg.png'), Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==', 'base64'));
+  await page.locator('#settingsClose').click();
+  // Re-opening runs loadConfig again, which is what refreshes the folder list.
+  await page.locator('#settings').click();
+  await page.waitForTimeout(900);
+  const folder = await page.evaluate(() => ({
+    count: document.querySelectorAll('#bgFolderGrid .wallpaper-card').length,
+    named: [...document.querySelectorAll('#bgFolderGrid .wallpaper-card b')].map(node => node.textContent),
+    hasImport: Boolean(document.getElementById('bgFolderImport')),
+    hasOpen: Boolean(document.getElementById('bgFolderOpen')),
+  }));
+  check('background: the folder library lists files straight from disk',
+    folder.count === 1 && folder.named[0] === 'e2e-bg.png' && folder.hasImport && folder.hasOpen,
+    JSON.stringify(folder));
+
+  await page.locator('#bgFolderGrid .wallpaper-card').first().click();
+  await page.waitForTimeout(800);
+  const applied = await page.evaluate(() => {
+    const element = document.getElementById('bgImage');
+    return {
+      hasBg: document.body.classList.contains('has-bg'),
+      url: element.style.backgroundImage,
+      label: document.getElementById('bgPreviewLabel').textContent,
+    };
+  });
+  check('background: clicking a folder file applies it',
+    applied.hasBg && applied.url.includes('diary-wallpaper://bg/') && applied.url.includes('e2e-bg.png'),
+    JSON.stringify({ hasBg: applied.hasBg, url: applied.url.slice(0, 64), label: applied.label }));
+
+  // ---------- music folder + the note button ----------
+  const musicUi = await page.evaluate(() => ({
+    grid: Boolean(document.getElementById('bgMusicGrid')),
+    // A `loop` attribute would repeat one file forever and never fire `ended`.
+    loopAttr: document.getElementById('bgmPlayer').hasAttribute('loop'),
+    toggle: Boolean(document.getElementById('musicToggle')),
+  }));
+  check('music: folder grid renders and the player is free to advance',
+    musicUi.grid && musicUi.toggle && !musicUi.loopAttr, JSON.stringify(musicUi));
+
+  await page.locator('#settingsClose').click();
+  await page.locator('#primaryNav [data-view="home"]').click();
+  await page.waitForTimeout(500);
+  const toggle = await page.evaluate(() => {
+    const button = document.getElementById('musicToggle');
+    const rect = button.getBoundingClientRect();
+    return { visible: !button.hidden && rect.width > 20, gapFromBottom: Math.round(window.innerHeight - rect.bottom) };
+  });
+  check('music: the note button floats over the portal screen',
+    toggle.visible && toggle.gapFromBottom >= 0 && toggle.gapFromBottom < 120, JSON.stringify(toggle));
+  await page.locator('#musicToggle').click();
+  await page.waitForTimeout(400);
+  const toastText = await page.locator('#toast').textContent();
+  check('music: an empty folder is explained instead of failing silently',
+    /还没有音乐/.test(toastText ?? ''), toastText ?? '');
+
+  // The remaining checks assume the settings panel is open on the wallpaper tab;
+  // the note-button section above deliberately closed it.
+  await page.locator('#settings').click();
+  await page.locator('.settings-tabs [data-tab="media"]').click();
+  await page.waitForTimeout(400);
+
   await page.evaluate(async () => {
     const canvas = document.createElement('canvas'); canvas.width = 8; canvas.height = 8;
     const context = canvas.getContext('2d'); context.fillStyle = '#2b3a67'; context.fillRect(0, 0, 8, 8);
@@ -313,6 +422,11 @@ try {
   // ---------- identity + local persistence ----------
   const profile = await page.evaluate(() => localStorage.getItem('diary.campus.cases'));
   check('guide: cases persisted locally', typeof profile === 'string' && profile.includes('title'), profile?.slice(0, 40) ?? '');
+} catch (error) {
+  // Without this the failure was swallowed: `finally` exited with 0 and a run
+  // that died half way still looked green.
+  console.log(`\nABORTED after ${results.length} checks: ${error instanceof Error ? error.message.split('\n')[0] : String(error)}`);
+  console.log(error instanceof Error ? (error.stack ?? '').split('\n').slice(1, 5).join('\n') : '');
 } finally {
   console.log(`\n${results.filter(r => r.ok).length}/${results.length} checks passed`);
   await Promise.race([app.close(), new Promise(r => setTimeout(r, 6000))]).catch(() => undefined);
