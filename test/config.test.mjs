@@ -38,16 +38,62 @@ test('unknown provider cannot be selected; missing secret returns null', async (
   } finally { cleanup(); }
 });
 
-test('oauth tokens and media preferences round-trip through reload', async () => {
+test('oauth tokens, google identity and media preferences round-trip through reload', async () => {
   const { root, config, cleanup } = await fresh();
   try {
-    config.setOAuth('google', 'tok-abc');
-    config.setMedia({ background: 'bg-1', bgm: 'bgm-2' });
+    config.setToken('google', { accessToken: 'tok-abc', linkedUserId: 'u-1' });
+    config.setGoogle({ googleId: 'g@x.com', email: 'g@x.com', name: 'G User', picture: null });
+    config.setBackground({ kind: 'image', media: 'bg-1', dim: 0.25, blur: 6 });
+    config.setMedia({ bgm: 'bgm-2' });
     await config.save();
     const reloaded = await HostConfig.open(root);
-    assert.equal(reloaded.getOAuth('google'), 'tok-abc');
-    assert.equal(reloaded.getOAuth('microsoft'), null);
-    assert.equal(reloaded.media.background, 'bg-1');
+    assert.equal(reloaded.getToken('google')?.accessToken, 'tok-abc');
+    assert.equal(reloaded.getToken('google')?.linkedUserId, 'u-1');
+    assert.equal(reloaded.getToken('microsoft'), null);
+    // Google identity is stored separately from the access token.
+    assert.equal(reloaded.google?.email, 'g@x.com');
+    assert.equal(reloaded.google?.name, 'G User');
+    assert.equal(reloaded.media.background.kind, 'image');
+    assert.equal(reloaded.media.background.media, 'bg-1');
+    assert.equal(reloaded.media.background.dim, 0.25);
+    assert.equal(reloaded.media.background.blur, 6);
     assert.equal(reloaded.media.bgm, 'bgm-2');
+  } finally { cleanup(); }
+});
+
+test('network and location stay off until the user opts in', async () => {
+  const { root, config, cleanup } = await fresh();
+  try {
+    assert.equal(config.permissions.network, false);
+    assert.equal(config.permissions.location, false);
+    config.setPermissions({ network: true });
+    await config.save();
+    const reloaded = await HostConfig.open(root);
+    assert.equal(reloaded.permissions.network, true);
+    assert.equal(reloaded.permissions.location, false);
+  } finally { cleanup(); }
+});
+
+test('built-in plugins are enabled by default and can be switched off', async () => {
+  const { root, config, cleanup } = await fresh();
+  try {
+    assert.equal(config.isPluginEnabled('wallpaper'), true);
+    config.setPluginEnabled('wallpaper', false);
+    await config.save();
+    const reloaded = await HostConfig.open(root);
+    assert.equal(reloaded.isPluginEnabled('wallpaper'), false);
+    assert.equal(reloaded.isPluginEnabled('weather'), true);
+  } finally { cleanup(); }
+});
+
+test('the flat pre-plugin background value migrates into the new shape', async () => {
+  const { root, config, cleanup } = await fresh();
+  try {
+    config.setMedia({ background: 'legacy-bg' });
+    await config.save();
+    const reloaded = await HostConfig.open(root);
+    assert.equal(reloaded.media.background.kind, 'image');
+    assert.equal(reloaded.media.background.media, 'legacy-bg');
+    assert.equal(reloaded.media.background.fit, 'cover');
   } finally { cleanup(); }
 });

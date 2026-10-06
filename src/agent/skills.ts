@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import { SkillEngine, type Capability, type CapabilityHandler } from '../plugins/skill-engine.ts';
-import { createProvider } from './connectors.ts';
+import { createProvider, PluginProvider } from './connectors.ts';
 import type { Provider } from './provider.ts';
 import type { HostConfig } from '../host/config.ts';
-import { getWeather, reverseGeocode, today, webSearch } from './web.ts';
+import type { ProviderPlugin } from '../host/plugins.ts';
+import { getAirQuality, getWeather, locateByIp, reverseGeocode, today, webSearch } from './web.ts';
 import { importMedia, readMediaDataUrl } from '../host/media.ts';
 
 const DIARY_SYSTEM = '你是一位温柔、克制的日记助手。帮助用户把一天的心情、事件与想法整理成真诚、自然的日记文字；' +
@@ -20,14 +21,15 @@ async function decodeImage(result: { url?: string; b64?: string; mime?: string }
   throw new Error('Image generation returned no payload');
 }
 
-export interface AgentOptions { vault: string; config: HostConfig; fetchImpl?: typeof fetch }
+export interface AgentOptions { vault: string; config: HostConfig; fetchImpl?: typeof fetch; plugins?: readonly ProviderPlugin[] }
+export type ProbeResult = { ok: boolean; ms: number; provider: string; model: string; detail: string };
 export interface ComposeInput {
   task?: 'compose' | 'polish' | 'continue' | 'title' | 'illustrate-prompt';
   messages: { role: 'system' | 'user' | 'assistant'; content: string }[];
   system?: string;
 }
 export interface WebInput {
-  kind: 'date' | 'weather' | 'geocode' | 'search';
+  kind: 'date' | 'weather' | 'geocode' | 'search' | 'air' | 'locate';
   lat?: number; lon?: number; locale?: string; query?: string;
 }
 export interface LayoutInput { markdown: string; template: 'journal' | 'letter' | 'bullets' | 'none' }
@@ -52,12 +54,27 @@ function applyLayout(input: LayoutInput): string {
  * the host (desktop or Android) performs the work and never exposes secrets to the web layer.
  */
 export function buildAgent(options: AgentOptions): { engine: SkillEngine; api: AgentApi } {
-  const { vault, config, fetchImpl = fetch } = options;
+  const { vault, config, fetchImpl = fetch, plugins = [] } = options;
+  const pluginMap = new Map(plugins.map(plugin => [plugin.id, plugin]));
   const provider = async (): Promise<Provider> => {
     const id = config.activeProvider;
-    const key = await config.getSecret(id);
+    const settings = config.getProvider(id);
+    const key = (await config.getSecret(id)) ?? '';
+    const plugin = pluginMap.get(id);
+    // A plugin that owns its transport needs no key: it may shell out to a CLI
+    // or call a local gateway that authenticates some other way.
+    if (plugin?.chat) {
+      const run = plugin.chat;
+      const image = plugin.generateImage;
+      return new PluginProvider(id, (messages, chatOptions) => Promise.resolve(run({
+        messages, system: chatOptions.system, model: chatOptions.model ?? settings.model,
+        apiKey: key, baseUrl: settings.baseUrl, fetch: fetchImpl,
+      })), image ? (prompt, imageOptions) => Promise.resolve(image({
+        prompt, model: imageOptions.model ?? settings.model, apiKey: key, baseUrl: settings.baseUrl, fetch: fetchImpl,
+      })) : undefined);
+    }
     if (!key) throw new Error(`未配置提供方 "${id}" 的 API Key`);
-    return createProvider(id, config.getProvider(id), key, fetchImpl);
+    return createProvider(id, settings, key, fetchImpl);
   };
   const handlers: Partial<Record<Capability, CapabilityHandler>> = {
     'agent:invoke': async (input) => {
@@ -88,6 +105,11 @@ export function buildAgent(options: AgentOptions): { engine: SkillEngine; api: A
         if (typeof req.lat !== 'number' || typeof req.lon !== 'number') throw new Error('Geocode needs lat/lon');
         return reverseGeocode(req.lat, req.lon, fetchImpl);
       }
+      if (req.kind === 'air') {
+        if (typeof req.lat !== 'number' || typeof req.lon !== 'number') throw new Error('Air quality needs lat/lon');
+        return getAirQuality(req.lat, req.lon, fetchImpl);
+      }
+      if (req.kind === 'locate') return locateByIp(fetchImpl);
       return webSearch(req.query ?? '', async (prompt) => (await provider()).chat([{ role: 'user', content: prompt }]));
     },
     'layout:apply': async (input) => applyLayout(input as LayoutInput),
@@ -105,6 +127,20 @@ export function buildAgent(options: AgentOptions): { engine: SkillEngine; api: A
     illustrate: (prompt: string) => engine.execute('host.media', { prompt }),
     web: (input: WebInput) => engine.execute('host.web', input),
     layout: (input: LayoutInput) => engine.execute('host.layout', input),
+    // One tiny round-trip so the settings screen can prove the backend really works,
+    // instead of leaving the user to guess why a button did nothing.
+    probe: async (): Promise<ProbeResult> => {
+      const started = Date.now();
+      const providerId = config.activeProvider;
+      const model = config.getProvider(providerId).model;
+      try {
+        const instance = await provider();
+        const reply = await instance.chat([{ role: 'user', content: 'ping' }], { system: '只回复一个词：pong', temperature: 0 });
+        return { ok: true, ms: Date.now() - started, provider: providerId, model, detail: reply.trim().slice(0, 60) };
+      } catch (error) {
+        return { ok: false, ms: Date.now() - started, provider: providerId, model, detail: error instanceof Error ? error.message : String(error) };
+      }
+    },
   };
   return { engine, api };
 }
@@ -114,4 +150,5 @@ export interface AgentApi {
   illustrate(prompt: string): Promise<unknown>;
   web(input: WebInput): Promise<unknown>;
   layout(input: LayoutInput): Promise<unknown>;
+  probe(): Promise<ProbeResult>;
 }

@@ -7,9 +7,23 @@ import { HostConfig } from '../src/host/config.ts';
 import { buildAgent } from '../src/agent/skills.ts';
 
 function mockFetch(url) {
-  if (String(url).includes('chat/completions')) return Promise.resolve(new Response(JSON.stringify({ choices: [{ message: { content: 'AI 日记草稿' } }] }), { status: 200 }));
-  if (String(url).includes('images/generations')) return Promise.resolve(new Response(JSON.stringify({ data: [{ b64_json: Buffer.from('PNGDATA').toString('base64') }] }), { status: 200 }));
-  if (String(url).includes('api.openmeteo')) return Promise.resolve(new Response(JSON.stringify({ current: { temperature_2m: 20, weather_code: 0 } }), { status: 200 }));
+  const target = String(url);
+  if (target.includes('chat/completions')) return Promise.resolve(new Response(JSON.stringify({ choices: [{ message: { content: 'AI 日记草稿' } }] }), { status: 200 }));
+  if (target.includes('images/generations')) return Promise.resolve(new Response(JSON.stringify({ data: [{ b64_json: Buffer.from('PNGDATA').toString('base64') }] }), { status: 200 }));
+  if (target.includes('air-quality-api.open-meteo.com')) {
+    return Promise.resolve(new Response(JSON.stringify({ current: { us_aqi: 42, pm2_5: 12.5, pm10: 20, ozone: 60 } }), { status: 200 }));
+  }
+  // The host is api.open-meteo.com — a hyphen-less spelling does not resolve.
+  if (target.includes('api.open-meteo.com')) {
+    return Promise.resolve(new Response(JSON.stringify({
+      current: {
+        temperature_2m: 20, weather_code: 0, relative_humidity_2m: 55, apparent_temperature: 21,
+        wind_speed_10m: 12, wind_direction_10m: 135, wind_gusts_10m: 24, pressure_msl: 1012,
+        precipitation: 0, cloud_cover: 15, visibility: 20000, is_day: 1, time: '2026-10-06T10:00',
+      },
+      daily: { uv_index_max: [4] },
+    }), { status: 200 }));
+  }
   return Promise.resolve(new Response('{}', { status: 200 }));
 }
 
@@ -50,6 +64,18 @@ test('web date and weather route correctly', async () => {
     const weather = await agent.api.web({ kind: 'weather', lat: 39.9, lon: 116.4 });
     assert.equal(weather.tempC, 20);
     assert.equal(weather.description, '晴');
+    // The panel quotes these, so they must survive the round trip.
+    assert.equal(weather.humidity, 55);
+    assert.equal(weather.windDirText, '东南风');
+    assert.equal(weather.windScale, '3 级');
+    assert.equal(weather.apparentC, 21);
+    assert.equal(weather.uvIndex, 4);
+    assert.equal(weather.visibilityKm, 20);
+    assert.equal(weather.isDay, true);
+    const air = await agent.api.web({ kind: 'air', lat: 39.9, lon: 116.4 });
+    assert.equal(air.aqi, 42);
+    assert.equal(air.level, '优');
+    assert.equal(air.pm25, 12.5);
   } finally { cleanup(); }
 });
 

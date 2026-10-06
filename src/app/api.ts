@@ -13,7 +13,14 @@ export type Request = {
   name?: string; mime?: string; data?: string; background?: string | null; bgm?: string | null;
   avatar?: string | null; username?: string; signature?: string;
   provider?: string; clientId?: string; redirectUri?: string; state?: string; codeChallenge?: string; code?: string; codeVerifier?: string; url?: string;
+  displayName?: string; question?: string; answer?: string; remember?: boolean;
   apiKey?: string;
+  /** Background / wallpaper plugin. */
+  kind?: string; folder?: string; fit?: string; dim?: number; blur?: number;
+  path?: string; title?: string; animated?: boolean;
+  /** Plugin manager + permission switches. */
+  pluginId?: string; enabled?: boolean; network?: boolean; location?: boolean;
+  mode?: string; label?: string;
 };
 declare global {
   interface Window {
@@ -49,6 +56,42 @@ const DEFAULT_PROVIDERS: Record<string, { baseUrl: string; model: string }> = {
 };
 type AiSettings = { activeProvider: string; providers: Record<string, { baseUrl: string; model: string }>; keys: Record<string, string> };
 const defaultAi = (): AiSettings => ({ activeProvider: 'openai', providers: structuredClone(DEFAULT_PROVIDERS), keys: {} });
+
+// ---- Android local account model (mirrors the desktop HostConfig) ----------
+interface MobileUser {
+  id: string; username: string; displayName: string; avatar: string | null;
+  salt: string; hash: string; googleId: string | null; googleEmail: string | null;
+  recoveryQuestion: string | null; recoverySalt: string | null; recoveryHash: string | null;
+  createdAt: number; lastLoginAt: number | null; autoLogin: boolean;
+}
+interface MobileAccount {
+  users: MobileUser[];
+  session: { userId: string | null; remember: boolean };
+  google: { googleId: string; email: string; name: string; picture: string | null } | null;
+}
+const emptyMobileAccount = (): MobileAccount => ({ users: [], session: { userId: null, remember: false }, google: null });
+const USERNAME_PATTERN = /^[A-Za-z0-9_一-龥]{2,20}$/;
+function loadAccount(): MobileAccount { return load<MobileAccount>('account', emptyMobileAccount()); }
+function saveAccount(account: MobileAccount): void { store('account', account); }
+function newSalt(): Uint8Array { return crypto.getRandomValues(new Uint8Array(16)); }
+async function hashPassword(passcode: string, salt: Uint8Array): Promise<string> {
+  const key = await derivePasscode(passcode, salt);
+  return toBase64(Uint8Array.from(key.match(/../g)!.map(byte => parseInt(byte, 16))));
+}
+async function verifyPassword(passcode: string, user: MobileUser): Promise<boolean> {
+  return safeEqual(await hashPassword(passcode, fromBase64(user.salt)), user.hash);
+}
+function checkUsername(account: MobileAccount, username: string, exceptId?: string): string {
+  const name = (username ?? '').trim();
+  if (!USERNAME_PATTERN.test(name)) throw new Error('用户名需为 2-20 位中英文、数字或下划线');
+  if (account.users.some(u => u.id !== exceptId && u.username.toLowerCase() === name.toLowerCase())) throw new Error('该用户名已被占用');
+  return name;
+}
+function checkPassword(passcode: string, confirmation?: string): string {
+  if (typeof passcode !== 'string' || passcode.length < 6) throw new Error('密码至少 6 位');
+  if (confirmation !== undefined && passcode !== confirmation) throw new Error('两次输入的密码不一致');
+  return passcode;
+}
 function load<T>(key: string, fallback: T): T {
   try { const raw = localStorage.getItem(`diary.${key}`); return raw === null ? fallback : JSON.parse(raw) as T; } catch { return fallback; }
 }
@@ -77,14 +120,21 @@ function safeEqual(left: string, right: string): boolean {
 function mobileConfig() {
   const settings = load<AiSettings>('ai', defaultAi());
   const providers = { ...DEFAULT_PROVIDERS, ...settings.providers };
+  const account = load<MobileAccount>('account', emptyMobileAccount());
+  const current = account.session.userId ? account.users.find(u => u.id === account.session.userId) ?? null : null;
   return {
     activeProvider: settings.activeProvider,
     providers: Object.entries(providers).map(([id, entry]) => ({ id, baseUrl: entry.baseUrl, model: entry.model, hasKey: Boolean(settings.keys[id]) })),
     profile: load<{ username: string; avatar: string | null; signature: string }>('profile', { username: '', avatar: null, signature: '' }),
     media: load<{ background: string | null; bgm: string | null }>('media', { background: null, bgm: null }),
-    hasLocalAccount: load<{ salt: string; hash: string } | null>('account', null) !== null,
+    users: account.users.map(u => ({
+      id: u.id, username: u.username, displayName: u.displayName, avatar: u.avatar,
+      googleEmail: u.googleEmail, autoLogin: u.autoLogin, hasRecovery: Boolean(u.recoveryQuestion),
+    })),
+    currentUser: current ? { id: current.id, username: current.username, displayName: current.displayName, avatar: current.avatar, googleEmail: current.googleEmail } : null,
+    remember: account.session.remember,
+    google: account.google,
     oauthClients: load<Record<string, string>>('oauthClients', {}),
-    oauth: load<Record<string, string>>('oauth', {}),
   };
 }
 // Android uses the same TypeScript crypto and Markdown format over private native files.
@@ -140,19 +190,75 @@ async function mobile(request: Request): Promise<unknown> {
     if (typeof request.avatar === 'string' || request.avatar === null) profile.avatar = request.avatar;
     store('profile', profile); return profile;
   }
-  if (op === 'account:setLocal') {
-    if (typeof passcode !== 'string' || passcode.length < 4) throw new Error('Passcode too short');
-    const salt = crypto.getRandomValues(new Uint8Array(16));
-    store('account', { salt: toBase64(salt), hash: await derivePasscode(passcode, salt) });
-    return { ok: true };
+  if (op === 'account:list') return mobileConfig();
+  if (op === 'account:create') {
+    const account = loadAccount();
+    const username = checkUsername(account, String(request.username ?? ''));
+    const chosen = checkPassword(String(request.passcode ?? ''), typeof request.confirmation === 'string' ? request.confirmation : undefined);
+    const salt = newSalt();
+    const user: MobileUser = {
+      id: crypto.randomUUID(), username, displayName: (request.displayName ?? username).trim() || username, avatar: null,
+      salt: toBase64(salt), hash: await hashPassword(chosen, salt),
+      googleId: null, googleEmail: null, recoveryQuestion: null, recoverySalt: null, recoveryHash: null,
+      createdAt: Date.now(), lastLoginAt: Date.now(), autoLogin: Boolean(request.remember),
+    };
+    account.users.push(user);
+    account.session = { userId: user.id, remember: Boolean(request.remember) };
+    saveAccount(account);
+    store('profile', { ...load('profile', { username: '', avatar: null, signature: '' }), username: user.displayName, avatar: user.avatar });
+    return mobileConfig();
   }
-  if (op === 'account:verifyLocal') {
-    const saved = load<{ salt: string; hash: string } | null>('account', null);
-    if (!saved || typeof passcode !== 'string') return { ok: false };
-    return { ok: safeEqual(await derivePasscode(passcode, fromBase64(saved.salt)), saved.hash) };
+  if (op === 'account:signIn') {
+    const account = loadAccount();
+    const user = account.users.find(u => u.username.toLowerCase() === String(request.username ?? '').trim().toLowerCase());
+    if (!user) throw new Error('用户不存在');
+    if (!(await verifyPassword(String(request.passcode ?? ''), user))) throw new Error('密码错误');
+    user.lastLoginAt = Date.now();
+    if (request.remember) user.autoLogin = true;
+    account.session = { userId: user.id, remember: Boolean(request.remember) };
+    saveAccount(account);
+    store('profile', { ...load('profile', { username: '', avatar: null, signature: '' }), username: user.displayName, avatar: user.avatar });
+    return mobileConfig();
   }
-  if (op === 'account:clearLocal') { localStorage.removeItem('diary.account'); return { ok: true }; }
-  if (op === 'account:clearOAuth') { localStorage.removeItem('diary.account'); const p = load<{ username: string; avatar: string | null; signature: string }>('profile', { username: '', avatar: null, signature: '' }); p.username = ''; store('profile', p); return { ok: true }; }
+  if (op === 'account:signOut') { const account = loadAccount(); account.session = { userId: null, remember: false }; saveAccount(account); return mobileConfig(); }
+  if (op === 'account:renameDisplay') {
+    const account = loadAccount();
+    const user = account.users.find(u => u.id === String(request.id ?? ''));
+    if (!user) throw new Error('Unknown user');
+    const displayName = String(request.displayName ?? '').trim();
+    if (displayName) user.displayName = displayName;
+    saveAccount(account); return mobileConfig();
+  }
+  if (op === 'account:changePassword') {
+    const account = loadAccount();
+    const user = account.users.find(u => u.id === account.session.userId);
+    if (!user) throw new Error('Not signed in');
+    if (!(await verifyPassword(String(request.passcode ?? ''), user))) throw new Error('原密码错误');
+    const next = checkPassword(String(request.next ?? ''), typeof request.confirmation === 'string' ? request.confirmation : undefined);
+    const salt = newSalt(); user.salt = toBase64(salt); user.hash = await hashPassword(next, salt);
+    saveAccount(account); return { ok: true };
+  }
+  if (op === 'account:setRecovery') {
+    const account = loadAccount();
+    const user = account.users.find(u => u.id === account.session.userId);
+    if (!user) throw new Error('Not signed in');
+    const question = String(request.question ?? '').trim(); const answer = String(request.answer ?? '').trim();
+    if (question.length < 4) throw new Error('密保问题至少 4 个字');
+    if (answer.length < 2) throw new Error('密保答案至少 2 个字');
+    const salt = newSalt();
+    user.recoveryQuestion = question; user.recoverySalt = toBase64(salt);
+    user.recoveryHash = await hashPassword(answer.toLowerCase(), salt);
+    saveAccount(account); return mobileConfig();
+  }
+  if (op === 'account:recover') {
+    const account = loadAccount();
+    const user = account.users.find(u => u.id === String(request.id ?? ''));
+    if (!user || !user.recoveryHash) throw new Error('该账户未设置密保问题');
+    if (!safeEqual(await hashPassword(String(request.answer ?? '').trim().toLowerCase(), fromBase64(user.recoverySalt!)), user.recoveryHash)) throw new Error('密保答案不正确');
+    const next = checkPassword(String(request.next ?? ''), typeof request.confirmation === 'string' ? request.confirmation : undefined);
+    const salt = newSalt(); user.salt = toBase64(salt); user.hash = await hashPassword(next, salt);
+    saveAccount(account); return { ok: true };
+  }
   if (op === 'media:setBackground' || op === 'media:setBgm') {
     const media = load<{ background: string | null; bgm: string | null }>('media', { background: null, bgm: null });
     if (op === 'media:setBackground') media.background = request.background ?? null;
@@ -184,7 +290,38 @@ async function mobile(request: Request): Promise<unknown> {
   if (op === 'account:oauthFinish') {
     const clients = load<Record<string, string>>('oauthClients', {});
     const clientId = typeof request.provider === 'string' ? clients[request.provider] : undefined;
-    return native({ ...request, ...(clientId ? { clientId } : {}) });
+    const result = await native({ ...request, ...(clientId ? { clientId } : {}) }) as { ok?: boolean; email?: string; name?: string; picture?: string };
+    if (result?.ok && result.email) {
+      // One Google account <-> one local account; import name + avatar on first link.
+      const account = loadAccount();
+      const googleId = result.email;
+      let user = account.users.find(u => u.googleId === googleId) ?? null;
+      const picture = result.picture || null;
+      if (!user) {
+        const base = (result.name || googleId.split('@')[0] || 'user').replace(/[^A-Za-z0-9_一-龥]/g, '').slice(0, 20) || 'user';
+        let username = base.length >= 2 ? base : base + '用户'.slice(0, 2 - base.length);
+        while (account.users.some(u => u.username.toLowerCase() === username.toLowerCase())) username = `${username}${Math.floor(Math.random() * 90 + 10)}`.slice(0, 20);
+        const salt = newSalt();
+        const passcode = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+        user = {
+          id: crypto.randomUUID(), username, displayName: result.name || username, avatar: picture,
+          salt: toBase64(salt), hash: await hashPassword(passcode, salt),
+          googleId, googleEmail: googleId, recoveryQuestion: null, recoverySalt: null, recoveryHash: null,
+          createdAt: Date.now(), lastLoginAt: Date.now(), autoLogin: true,
+        };
+        account.users.push(user);
+      } else {
+        user.avatar = user.avatar ?? picture;
+        user.displayName = user.displayName || result.name || user.username;
+        user.lastLoginAt = Date.now();
+      }
+      account.google = { googleId, email: googleId, name: result.name || user.displayName, picture };
+      account.session = { userId: user.id, remember: true };
+      saveAccount(account);
+      store('profile', { ...load('profile', { username: '', avatar: null, signature: '' }), username: user.displayName, avatar: user.avatar });
+      return { ok: true, email: googleId, name: user.displayName, picture: user.avatar, userId: user.id };
+    }
+    return result;
   }
   // Network calls are host-only; carry the saved provider settings down with them.
   if (op === 'agent:compose' || op === 'agent:illustrate') {
