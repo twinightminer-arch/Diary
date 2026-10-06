@@ -193,11 +193,11 @@ function view(preview: boolean) {
 function showLock(firstTime = false) {
   unlocked = false;
   $('lockScreen').hidden = false;
-  $('lockHint').textContent = firstTime ? t('encryptHint') : t('unlockHint');
-  $('lockSet').hidden = !firstTime;
-  $('lockClear').hidden = firstTime;
+  $('lockHint').textContent = firstTime ? '选择登录方式，或创建仅保存在此设备上的本地账户。' : t('unlockHint');
+  $('loginMethods').hidden = !firstTime;
+  $('localLogin').hidden = firstTime;
   ($('lockPasscode') as HTMLInputElement).value = '';
-  ($('lockPasscode') as HTMLInputElement).focus();
+  if (!firstTime) ($('lockPasscode') as HTMLInputElement).focus();
 }
 function hideLock() { unlocked = true; $('lockScreen').hidden = true; }
 async function unlockWith(passcode: string): Promise<boolean> {
@@ -223,6 +223,17 @@ $('lockClear').onclick = action(async () => {
 });
 $('lockNow').onclick = () => showLock(false);
 $('lockPasscode').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); $('lockSubmit').click(); } });
+$('offlineCreate').onclick = action(async () => {
+  const response = await modal('创建本地离线账户', '密码至少 8 位，用于保护此设备上的 Diary 数据。', [{ name: 'next', label: '本地密码' }, { name: 'confirmation', label: '确认密码' }]);
+  if (!response) return;
+  await call({ op: 'account:setLocal', passcode: response.next! });
+  hideLock(); await refresh(); toast('本地账户已创建');
+});
+$('backToMethods').onclick = () => { $('localLogin').hidden = true; $('loginMethods').hidden = false; };
+document.querySelectorAll<HTMLButtonElement>('[data-login-provider]').forEach(button => button.onclick = () => {
+  const provider = button.dataset.loginProvider;
+  toast(`${provider === 'google' ? 'Google' : provider === 'apple' ? 'Apple' : 'QQ'} 登录需要先在设置中配置 OAuth Client ID。验证成功后将要求创建本地账户。`);
+});
 
 // ---------- Settings panel ----------
 async function loadConfig() {
@@ -240,6 +251,8 @@ async function loadConfig() {
   $<HTMLInputElement>('cfgApiKey').value = '';
   $<HTMLInputElement>('profileUsername').value = cfg.profile.username;
   $<HTMLInputElement>('profileSignature').value = cfg.profile.signature;
+  $('userName').textContent = cfg.profile.username.trim() || '本地用户';
+  $('userAvatar').textContent = (cfg.profile.username.trim()[0] || 'D').toLocaleUpperCase();
   $('accountState').textContent = cfg.hasLocalAccount ? t('localAccountOn') : t('localAccountOff');
   $('lockNow').hidden = !cfg.hasLocalAccount;
   $<HTMLInputElement>('googleClientId').value = cfg.oauthClients.google ?? '';
@@ -631,12 +644,65 @@ window.addEventListener('diary-back', () => {
   if (document.body.classList.contains('sidebar-open')) { document.body.classList.remove('sidebar-open'); return; }
   void action(async () => { if (await mayDiscard()) await call({ op: 'exit' }); })();
 });
+
+// ---------- Unified one-stop navigation ----------
+type PortalView = 'home' | 'chat' | 'search-view' | 'competition' | 'guide' | 'diary';
+const viewTitles: Record<PortalView, string> = { home: '首页', chat: 'AI 问答', 'search-view': 'AI 搜索', competition: '竞赛中心', guide: '办事指南', diary: '日记' };
+let activeView: PortalView = 'home';
+function activateView(viewName: PortalView) {
+  if (activeView === viewName) return;
+  activeView = viewName;
+  const ids: Record<PortalView, string> = { home: 'homeView', chat: 'chatView', 'search-view': 'searchView', competition: 'competitionView', guide: 'guideView', diary: 'diaryView' };
+  for (const [name, id] of Object.entries(ids) as [PortalView, string][]) {
+    const panel = $(id); panel.hidden = name !== viewName; panel.classList.toggle('active-view', name === viewName);
+  }
+  document.querySelectorAll<HTMLButtonElement>('#primaryNav [data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === viewName));
+  $('diarySidebar').hidden = viewName !== 'diary';
+  $('breadcrumbDate').textContent = viewTitles[viewName];
+  document.body.classList.remove('sidebar-open');
+}
+document.addEventListener('click', event => {
+  const target = (event.target as HTMLElement).closest<HTMLElement>('[data-view]');
+  const name = target?.dataset.view as PortalView | undefined;
+  if (name && name in viewTitles) activateView(name);
+});
+
+const competitions = [
+  ['中国大学生计算机设计大赛', '学科竞赛 · 编程 / AI / 设计', '主办方信息待接入'],
+  ['全国大学生创新创业训练计划', '创新创业 · 团队项目', '教育主管部门信息待接入'],
+  ['蓝桥杯全国软件和信息技术专业人才大赛', '程序设计 · 个人参赛', '竞赛官网信息待接入'],
+];
+function renderCompetitions(filter = '') {
+  const query = filter.trim().toLocaleLowerCase(); $('competitionList').replaceChildren();
+  for (const item of competitions.filter(value => value.join(' ').toLocaleLowerCase().includes(query))) {
+    const card = document.createElement('article'); card.className = 'competition-card';
+    const heading = document.createElement('h3'); heading.textContent = item[0]!;
+    const badge = document.createElement('span'); badge.textContent = '演示';
+    const detail = document.createElement('p'); detail.textContent = `${item[1]} · ${item[2]}`;
+    card.append(heading, badge, detail); $('competitionList').append(card);
+  }
+}
+renderCompetitions();
+$<HTMLInputElement>('competitionSearch').oninput = event => renderCompetitions((event.currentTarget as HTMLInputElement).value);
+$('campusSend').onclick = action(async () => {
+  const input = $<HTMLTextAreaElement>('campusPrompt'); const prompt = input.value.trim(); if (!prompt) return;
+  const conversation = $('campusConversation');
+  const user = document.createElement('div'); user.className = 'message user'; const userBubble = document.createElement('div'); userBubble.className = 'bubble'; userBubble.textContent = prompt; user.append(userBubble); conversation.append(user); input.value = '';
+  const answer = await call<string>({ op: 'agent:compose', messages: [{ role: 'user', content: prompt }], task: 'compose' });
+  const assistant = document.createElement('div'); assistant.className = 'message assistant'; const avatar = document.createElement('span'); avatar.className = 'message-avatar'; avatar.textContent = '✦'; const bubble = document.createElement('div'); bubble.className = 'bubble'; bubble.textContent = answer; assistant.append(avatar, bubble); conversation.append(assistant);
+});
+$('portalSearchButton').onclick = action(async () => {
+  const query = $<HTMLInputElement>('portalSearchInput').value.trim(); if (!query) return;
+  const result = await call<string>({ op: 'agent:compose', messages: [{ role: 'user', content: `请联网检索并核验以下问题，明确标注来源：${query}` }], task: 'compose' });
+  $('portalSearchResult').replaceChildren(); const heading = document.createElement('h2'); heading.textContent = query; const body = document.createElement('p'); body.textContent = result; $('portalSearchResult').append(heading, body);
+});
+
 document.body.classList.toggle('dark', localStorage.getItem('diary.dark') === 'true');
 translate();
-setMode(appMode);
+activeView = 'guide'; activateView('home');
 // Boot: load config (lock screen if a local account exists), then refresh.
 void action(async () => {
   const cfg = await call<{ hasLocalAccount: boolean }>({ op: 'config:get' });
-  if (cfg.hasLocalAccount) showLock(false); else unlocked = true;
+  showLock(!cfg.hasLocalAccount);
   await refresh();
 })();

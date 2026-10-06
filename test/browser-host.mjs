@@ -6,6 +6,7 @@ import { MarkdownEngine } from '../src/storage/markdown-engine.ts';
 
 export async function launchBrowserHost(directory) {
   const engine = await MarkdownEngine.open(directory);
+  let localPasscode = null;
   const root = resolve('dist/web');
   const server = createServer(async (request, response) => {
     try {
@@ -31,7 +32,10 @@ export async function launchBrowserHost(directory) {
       case 'decrypt': return engine.decryptEntry(id, passcode);
       case 'changePasscode': return engine.changeEntryPasscode(id, passcode, next, confirmation);
       case 'info': return { location: directory };
-      case 'config:get': return { activeProvider: 'openai', providers: [{ id: 'openai', baseUrl: '', model: '', hasKey: false }], profile: { username: '', avatar: null, signature: '' }, media: { background: null, bgm: null }, hasLocalAccount: false, oauthClients: {} };
+      case 'config:get': return { activeProvider: 'openai', providers: [{ id: 'openai', baseUrl: '', model: '', hasKey: false }], profile: { username: '', avatar: null, signature: '' }, media: { background: null, bgm: null }, hasLocalAccount: localPasscode !== null, oauthClients: {} };
+      case 'account:setLocal': localPasscode = request.passcode; return { ok: true };
+      case 'account:verifyLocal': return { ok: request.passcode === localPasscode };
+      case 'account:clearLocal': localPasscode = null; return { ok: true };
       case 'media:list': return [];
       default: throw Error('Unsupported test action');
     }

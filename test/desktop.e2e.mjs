@@ -6,8 +6,8 @@ import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { launchBrowserHost } from './browser-host.mjs';
 
 test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron'}: CRUD, restart persistence, encryption, preview and languages`, { timeout: 180000 }, async () => {
-  await mkdir('../../work/ui-tests', { recursive: true });
-  const home = await mkdtemp(resolve('../../work/ui-tests/run-'));
+  await mkdir('work/ui-tests', { recursive: true });
+  const home = await mkdtemp(resolve('work/ui-tests/run-'));
   const env = { ...process.env, DIARY_TEST_HOME: home, DIARY_TEST_VAULT: join(home, 'journals') };
   delete env.ELECTRON_RUN_AS_NODE;
   const executablePath = process.env.DIARY_EXE || resolve('node_modules/electron/dist/electron.exe');
@@ -21,6 +21,13 @@ test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron
     app = await launch();
     let page = await app.firstWindow();
     page.on('pageerror', error => errors.push(error.message));
+    if (await page.locator('#lockScreen').isVisible()) {
+      if (await page.locator('#offlineCreate').isVisible()) {
+        await page.locator('#offlineCreate').click();
+        await page.locator('[name=next]').fill('local-test-123'); await page.locator('[name=confirmation]').fill('local-test-123'); await page.locator('#modalConfirm').click();
+      } else { await page.locator('#lockPasscode').fill('local-test-123'); await page.locator('#lockSubmit').click(); }
+    }
+    await page.locator('[data-view="diary"]').first().click();
     await expect(page.locator('#firstEntry')).toBeVisible();
     await page.locator('#firstEntry').click();
     await page.locator('#title').fill('把今天，写进日记');
@@ -47,6 +54,13 @@ test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron
 
     app = await launch();
     page = await app.firstWindow(); page.on('pageerror', error => errors.push(error.message));
+    if (await page.locator('#lockScreen').isVisible()) {
+      if (await page.locator('#offlineCreate').isVisible()) {
+        await page.locator('#offlineCreate').click();
+        await page.locator('[name=next]').fill('local-test-123'); await page.locator('[name=confirmation]').fill('local-test-123'); await page.locator('#modalConfirm').click();
+      } else { await page.locator('#lockPasscode').fill('local-test-123'); await page.locator('#lockSubmit').click(); }
+    }
+    await page.locator('[data-view="diary"]').first().click();
     await page.locator('.entry-card').click();
     await page.locator('[name=password]').fill('wrong'); await page.locator('#modalConfirm').click();
     await expect(page.locator('#toast')).toContainText('密码错误');
@@ -64,14 +78,9 @@ test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron
     await expect(page.locator('#toast')).toHaveText('操作完成');
     await page.locator('#settings').click(); await page.locator('.settings-tabs button[data-tab="lang"]').click(); await page.locator('#cfgLocale').selectOption('en-US');
     await expect(page.locator('#save')).toHaveText('Save');
-    await page.locator('#settingsClose').click(); await page.locator('#campusMode').click();
-    await expect(page.locator('#campusWorkspace')).toBeVisible();
-    await page.locator('#campusQuestion').fill('宿舍水管坏了，需要报修'); await page.locator('#campusMatch').click();
-    await expect(page.locator('.service-card')).toHaveCount(1); await expect(page.locator('.service-card strong')).toHaveText('宿舍报修');
-    await page.locator('.service-card').click(); await page.locator('.case-actions .primary').click();
-    await expect(page.locator('#caseList .case-card')).toHaveCount(1); await expect(page.locator('.route-row')).toHaveCount(4);
-    await page.locator('.case-actions .primary').click(); await expect(page.locator('.route-row.done')).toHaveCount(1);
-    await page.locator('#diaryMode').click();
+    await page.locator('#settingsClose').click();
+    for (const view of ['home','chat','search-view','competition','guide','diary','home','diary']) await page.locator(`#primaryNav [data-view="${view}"]`).click();
+    await expect(page.locator('#diaryView')).toBeVisible();
     await page.locator('#theme').click(); await expect(page.locator('body')).toHaveClass('dark');
     await page.locator('#more').click(); await page.locator('#delete').click(); await page.locator('#modalConfirm').click();
     await expect(page.locator('.entry-card')).toHaveCount(0);

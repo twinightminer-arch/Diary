@@ -137,7 +137,7 @@ else {
     win = new BrowserWindow({
       width: 1280, height: 850, minWidth: 760, minHeight: 560, title: 'Diary',
       backgroundColor: '#f8f7f4', icon: join(appDir, '../assets/icon.ico'), show: !process.env.DIARY_TEST_HOME,
-      webPreferences: { preload: join(appDir, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true },
+      webPreferences: { preload: join(appDir, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: process.env.DIARY_TEST_NO_SANDBOX !== '1' },
     });
     win.setMenuBarVisibility(false);
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));

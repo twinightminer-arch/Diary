@@ -2,3 +2,8 @@ node_modules/
 vault/
 dist/
 android-build/
+.android-sdk/
+.builder-cache/
+.electron-cache/
+.npm-cache/
+work/
