@@ -36,7 +36,7 @@ export async function verifyLocalPasscode(config: HostConfig, passcode: string):
   return timingSafeEqual(candidate, expected);
 }
 
-export type OAuthProvider = 'google' | 'microsoft';
+export type OAuthProvider = 'google';
 export interface OAuthEndpoints { authorize: string; token: string; scope: string }
 const ENDPOINTS: Record<OAuthProvider, OAuthEndpoints> = {
   google: {
@@ -44,12 +44,28 @@ const ENDPOINTS: Record<OAuthProvider, OAuthEndpoints> = {
     token: 'https://oauth2.googleapis.com/token',
     scope: 'openid email profile',
   },
-  microsoft: {
-    authorize: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
-    token: 'https://login.microsoftonline.com/common/oauth2/v2.0/token',
-    scope: 'openid email profile offline_access',
-  },
 };
+
+/**
+ * Google OAuth 2.0 client IDs.
+ * - The desktop client is a "Desktop app" type and uses the OAuth 2.0 PKCE
+ *   flow (loopback redirect). Per Google's guidance, native/desktop public
+ *   clients do NOT need (and should not ship) a client secret. The secret is
+ *   therefore left empty here and may be injected at build time via the
+ *   GOOGLE_DESKTOP_CLIENT_SECRET environment variable if your Google Cloud
+ *   project still requires one.
+ * - The Android client is an "Android" type identified by package name +
+ *   signing SHA-1 and has no secret.
+ */
+export const GOOGLE_DESKTOP_CLIENT_ID = '933958043196-c8ktud98bdmkbiovnns1dst47b7mcb19.apps.googleusercontent.com';
+export const GOOGLE_DESKTOP_CLIENT_SECRET = '';
+export const GOOGLE_ANDROID_CLIENT_ID = '933958043196-8otpn6ub49h2oo2agrdjocljl5p3559g.apps.googleusercontent.com';
+export const GOOGLE_ANDROID_REDIRECT = `com.googleusercontent.apps.${GOOGLE_ANDROID_CLIENT_ID}:/oauth2callback`;
+export const GOOGLE_USERINFO = 'https://openidconnect.googleapis.com/v1/userinfo';
+
+export function googleClientId(platform: 'desktop' | 'android'): string {
+  return platform === 'desktop' ? GOOGLE_DESKTOP_CLIENT_ID : GOOGLE_ANDROID_CLIENT_ID;
+}
 /** Build a PKCE authorization URL. The code verifier must be kept client-side until exchange. */
 export function buildAuthUrl(provider: OAuthProvider, params: {
   clientId: string; redirectUri: string; state: string; codeChallenge: string;
@@ -67,11 +83,12 @@ export function buildAuthUrl(provider: OAuthProvider, params: {
 }
 export function tokenEndpoint(provider: OAuthProvider): string { return ENDPOINTS[provider].token; }
 export async function exchangeCode(provider: OAuthProvider, params: {
-  clientId: string; code: string; codeVerifier: string; redirectUri: string;
+  clientId: string; code: string; codeVerifier: string; redirectUri: string; clientSecret?: string;
 }, fetchImpl: typeof fetch = fetch): Promise<{ access_token: string; expires_in?: number }> {
   const body = new URLSearchParams({
     client_id: params.clientId, code: params.code, code_verifier: params.codeVerifier,
     redirect_uri: params.redirectUri, grant_type: 'authorization_code',
+    ...(params.clientSecret ? { client_secret: params.clientSecret } : {}),
   });
   const response = await fetchImpl(tokenEndpoint(provider), {
     method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body,
@@ -80,4 +97,12 @@ export async function exchangeCode(provider: OAuthProvider, params: {
   const json = await response.json() as { access_token: string; expires_in?: number };
   if (!json.access_token) throw new Error('OAuth token exchange returned no access token');
   return json;
+}
+
+/** Fetch the Google identity (email, name, picture) for a freshly minted access token. */
+export async function googleUserInfo(accessToken: string, fetchImpl: typeof fetch = fetch): Promise<{ email: string; name: string; picture: string }> {
+  const response = await fetchImpl(GOOGLE_USERINFO, { headers: { Authorization: `Bearer ${accessToken}` } });
+  if (!response.ok) throw new Error(`Google userinfo failed (${response.status})`);
+  const json = await response.json() as { email?: string; name?: string; picture?: string };
+  return { email: json.email ?? '', name: json.name ?? '', picture: json.picture ?? '' };
 }

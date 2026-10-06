@@ -34,6 +34,9 @@ public final class MainActivity extends Activity {
   private byte[] exportData;
   private static final int IMPORT = 101, EXPORT = 102;
   private static final String ORIGIN = "https://appassets.androidplatform.net";
+  // Google OAuth redirect: reverse-DNS scheme derived from the Android client ID.
+  private static final String GOOGLE_SCHEME = "com.googleusercontent.apps.933958043196-8otpn6ub49h2oo2agrdjocljl5p3559g";
+  private String pendingOAuthUri;
 
   @Override public void onCreate(Bundle state) {
     super.onCreate(state);
@@ -73,9 +76,15 @@ public final class MainActivity extends Activity {
         }
         return new WebResourceResponse("text/plain", "UTF-8", 404, "Not found", null, new ByteArrayInputStream(new byte[0]));
       }
+      @Override public void onPageFinished(WebView view, String url) {
+        if (pendingOAuthUri != null) { final String uri = pendingOAuthUri; pendingOAuthUri = null; relayOAuth(uri); }
+      }
     });
     web.setWebChromeClient(new WebChromeClient());
     setContentView(web);
+    final Intent launch = getIntent();
+    if (launch != null && launch.getData() != null && GOOGLE_SCHEME.equals(launch.getData().getScheme()))
+      pendingOAuthUri = launch.getData().toString();
     web.loadUrl(ORIGIN + "/index.html");
   }
 
@@ -226,7 +235,7 @@ public final class MainActivity extends Activity {
               if (!target.isFile() || !target.delete()) throw new IOException("Cannot delete entry");
               break;
             }
-            case "info": result = new JSONObject().put("platform", "Android").put("location", vault.getAbsolutePath()).put("version", "0.1.0"); break;
+            case "info": result = new JSONObject().put("platform", "Android").put("location", vault.getAbsolutePath()).put("version", "0.1.1"); break;
             case "import": case "export": {
               final byte[] payload = op.equals("export") ? read(file(request.getString("id"))).getBytes(StandardCharsets.UTF_8) : null;
               final String name = request.optString("id", "diary") + ".md";
@@ -338,14 +347,22 @@ public final class MainActivity extends Activity {
               break;
             }
             case "account:oauthFinish": {
-              boolean microsoft = "microsoft".equals(request.getString("provider"));
-              String tokenUrl = microsoft ? "https://login.microsoftonline.com/common/oauth2/v2.0/token" : "https://oauth2.googleapis.com/token";
+              String tokenUrl = "https://oauth2.googleapis.com/token";
               String form = "grant_type=authorization_code&code=" + encode(request.getString("code"))
                 + "&client_id=" + encode(request.optString("clientId", ""))
                 + "&redirect_uri=" + encode(request.getString("redirectUri"))
                 + "&code_verifier=" + encode(request.getString("codeVerifier"));
               JSONObject body = new JSONObject(http("POST", tokenUrl, form, "application/x-www-form-urlencoded", null));
-              result = new JSONObject().put("ok", body.has("access_token"));
+              String access = body.optString("access_token", null);
+              JSONObject info = null;
+              if (access != null) {
+                try { info = new JSONObject(http("GET", "https://openidconnect.googleapis.com/v1/userinfo", null, null, access)); }
+                catch (Exception ignored) { }
+              }
+              result = new JSONObject().put("ok", body.has("access_token"))
+                .put("email", info == null ? "" : info.optString("email", ""))
+                .put("name", info == null ? "" : info.optString("name", ""))
+                .put("picture", info == null ? "" : info.optString("picture", ""));
               break;
             }
             case "openExternal": {
@@ -380,6 +397,19 @@ public final class MainActivity extends Activity {
           reply(id, true, null);
         }
       } catch (Exception error) { reply(id, null, error); }
+    });
+  }
+  @Override protected void onNewIntent(Intent intent) {
+    super.onNewIntent(intent);
+    setIntent(intent);
+    if (intent != null && intent.getData() != null && GOOGLE_SCHEME.equals(intent.getData().getScheme())) {
+      if (web != null) relayOAuth(intent.getData().toString());
+      else pendingOAuthUri = intent.getData().toString();
+    }
+  }
+  private void relayOAuth(String uri) {
+    runOnUiThread(() -> {
+      if (!isDestroyed()) web.evaluateJavascript("window.__diaryOAuthRedirect&&window.__diaryOAuthRedirect(" + JSONObject.quote(uri) + ")", null);
     });
   }
   @Override public void onBackPressed() { web.evaluateJavascript("window.dispatchEvent(new Event('diary-back'))", null); }

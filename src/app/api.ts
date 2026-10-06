@@ -84,6 +84,7 @@ function mobileConfig() {
     media: load<{ background: string | null; bgm: string | null }>('media', { background: null, bgm: null }),
     hasLocalAccount: load<{ salt: string; hash: string } | null>('account', null) !== null,
     oauthClients: load<Record<string, string>>('oauthClients', {}),
+    oauth: load<Record<string, string>>('oauth', {}),
   };
 }
 // Android uses the same TypeScript crypto and Markdown format over private native files.
@@ -151,6 +152,7 @@ async function mobile(request: Request): Promise<unknown> {
     return { ok: safeEqual(await derivePasscode(passcode, fromBase64(saved.salt)), saved.hash) };
   }
   if (op === 'account:clearLocal') { localStorage.removeItem('diary.account'); return { ok: true }; }
+  if (op === 'account:clearOAuth') { localStorage.removeItem('diary.account'); const p = load<{ username: string; avatar: string | null; signature: string }>('profile', { username: '', avatar: null, signature: '' }); p.username = ''; store('profile', p); return { ok: true }; }
   if (op === 'media:setBackground' || op === 'media:setBgm') {
     const media = load<{ background: string | null; bgm: string | null }>('media', { background: null, bgm: null });
     if (op === 'media:setBackground') media.background = request.background ?? null;

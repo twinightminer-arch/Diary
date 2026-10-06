@@ -230,9 +230,12 @@ $('offlineCreate').onclick = action(async () => {
   hideLock(); await refresh(); toast('本地账户已创建');
 });
 $('backToMethods').onclick = () => { $('localLogin').hidden = true; $('loginMethods').hidden = false; };
-document.querySelectorAll<HTMLButtonElement>('[data-login-provider]').forEach(button => button.onclick = () => {
-  const provider = button.dataset.loginProvider;
-  toast(`${provider === 'google' ? 'Google' : provider === 'apple' ? 'Apple' : 'QQ'} 登录需要先在设置中配置 OAuth Client ID。验证成功后将要求创建本地账户。`);
+document.querySelectorAll<HTMLButtonElement>('[data-login-provider]').forEach(button => {
+  button.onclick = action(async () => {
+    const provider = button.dataset.loginProvider;
+    if (provider === 'google') await loginWithGoogle();
+    else toast('该登录方式已移除，请使用 Google 或本地账户。');
+  });
 });
 
 // ---------- Settings panel ----------
@@ -241,7 +244,7 @@ async function loadConfig() {
     activeProvider: string; providers: { id: string; baseUrl: string; model: string; hasKey: boolean }[];
     profile: { username: string; avatar: string | null; signature: string };
     media: { background: string | null; bgm: string | null };
-    hasLocalAccount: boolean; oauthClients: Record<string, string>;
+    hasLocalAccount: boolean; oauthClients: Record<string, string>; oauth: Record<string, string>;
   }>({ op: 'config:get' });
   const sel = $<HTMLSelectElement>('cfgProvider'); sel.replaceChildren();
   for (const p of cfg.providers) { const opt = document.createElement('option'); opt.value = p.id; opt.textContent = `${p.id} · ${p.model || p.baseUrl}`; sel.append(opt); }
@@ -255,8 +258,10 @@ async function loadConfig() {
   $('userAvatar').textContent = (cfg.profile.username.trim()[0] || 'D').toLocaleUpperCase();
   $('accountState').textContent = cfg.hasLocalAccount ? t('localAccountOn') : t('localAccountOff');
   $('lockNow').hidden = !cfg.hasLocalAccount;
-  $<HTMLInputElement>('googleClientId').value = cfg.oauthClients.google ?? '';
-  $<HTMLInputElement>('microsoftClientId').value = cfg.oauthClients.microsoft ?? '';
+  const signedIn = Boolean(cfg.oauth && cfg.oauth.google);
+  $('googleState').textContent = signedIn ? `已使用 Google 登录：${cfg.oauth.google}` : '尚未使用 Google 登录';
+  $('googleLogin').hidden = signedIn;
+  $('googleLogout').hidden = !signedIn;
   const student = campusProfile();
   $<HTMLInputElement>('studentName').value = student.name; $<HTMLInputElement>('studentId').value = student.studentId;
   $<HTMLInputElement>('studentSchool').value = student.school; $<HTMLInputElement>('studentCollege').value = student.college;
@@ -339,7 +344,12 @@ $('cfgLocale').onchange = () => { locale.setLocale($<HTMLSelectElement>('cfgLoca
 $('accountSet').onclick = action(async () => { const r = await modal(t('setPasscode'), t('encryptHint'), [{ name: 'next', label: t('password') }, { name: 'confirmation', label: t('confirmPasscode') }]); if (r) { await call({ op: 'account:setLocal', passcode: r.next! }); await loadConfig(); toast(t('done')); } });
 $('accountClear').onclick = action(async () => { if (!await modal(t('deleteEntry'), t('deleteHint'))) return; await call({ op: 'account:clearLocal' }); await loadConfig(); toast(t('done')); });
 
-// ---------- OAuth PKCE (Google / Microsoft) ----------
+// ---------- Google OAuth (real, built-in client IDs) ----------
+const IS_DESKTOP = !!window.diary;
+const GOOGLE_CLIENT_ID = IS_DESKTOP
+  ? '933958043196-c8ktud98bdmkbiovnns1dst47b7mcb19.apps.googleusercontent.com'
+  : '933958043196-8otpn6ub49h2oo2agrdjocljl5p3559g.apps.googleusercontent.com';
+const GOOGLE_ANDROID_REDIRECT = 'com.googleusercontent.apps.933958043196-8otpn6ub49h2oo2agrdjocljl5p3559g:/oauth2callback';
 async function pkceChallenge(): Promise<{ verifier: string; challenge: string }> {
   const verifier = Array.from(crypto.getRandomValues(new Uint8Array(32))).map(b => b.toString(16).padStart(2, '0')).join('');
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
@@ -349,30 +359,70 @@ async function pkceChallenge(): Promise<{ verifier: string; challenge: string }>
   const challenge = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   return { verifier, challenge };
 }
-const oauthState = new Map<string, { verifier: string; redirectUri: string }>();
-async function startOAuth(provider: string, clientIdEl: string) {
-  const clientId = $<HTMLInputElement>(clientIdEl).value.trim();
-  if (!clientId) { toast(t('clientId')); return; }
-  const { verifier, challenge } = await pkceChallenge();
-  const redirectUri = 'http://localhost/diary-callback';
-  const state = crypto.randomUUID();
-  const result = await call<{ url: string }>({ op: 'account:oauthBegin', provider, clientId, redirectUri, state, codeChallenge: challenge });
-  oauthState.set(provider, { verifier, redirectUri });
-  await call({ op: 'openExternal', url: result.url });
-  toast(t('oauthTip'));
+const oauthAndroidPending = new Map<string, { verifier: string }>();
+let oauthAndroidResolve: ((value: { email?: string; name?: string } | null) => void) | null = null;
+(window as unknown as { __diaryOAuthRedirect?: (uri: string) => void }).__diaryOAuthRedirect = (uri: string) => {
+  try {
+    const u = new URL(uri);
+    const code = u.searchParams.get('code');
+    const state = u.searchParams.get('state');
+    const pending = state ? oauthAndroidPending.get(state) : null;
+    if (!code || !state || !pending) { toast('Google 授权回调无效，请重试，或在设置中手动粘贴授权码。'); return; }
+    oauthAndroidPending.delete(state);
+    void (async () => {
+      try {
+        const res = await call<{ ok: boolean; email: string; name: string }>({ op: 'account:oauthFinish', provider: 'google', code, codeVerifier: pending.verifier, redirectUri: GOOGLE_ANDROID_REDIRECT });
+        oauthAndroidResolve?.(res.ok ? res : null);
+      } catch (error) { toast('Google 登录失败：' + (error as Error).message); oauthAndroidResolve?.(null); }
+    })();
+  } catch { toast('Google 授权回调解析失败。'); }
+};
+
+async function loginWithGoogle(): Promise<void> {
+  let info: { email?: string; name?: string } | null = null;
+  if (IS_DESKTOP) {
+    info = await call<{ email?: string; name?: string }>({ op: 'account:oauthGoogle' });
+  } else {
+    const { verifier, challenge } = await pkceChallenge();
+    const state = crypto.randomUUID();
+    oauthAndroidPending.set(state, { verifier });
+    const begin = await call<{ url: string }>({ op: 'account:oauthBegin', provider: 'google', clientId: GOOGLE_CLIENT_ID, redirectUri: GOOGLE_ANDROID_REDIRECT, state, codeChallenge: challenge });
+    await call({ op: 'openExternal', url: begin.url });
+    toast('请在系统浏览器完成 Google 授权，授权后会自动返回 Diary。');
+    info = await new Promise<{ email?: string; name?: string } | null>(resolve => { oauthAndroidResolve = resolve; });
+  }
+  if (!info) { toast('Google 登录未完成。'); return; }
+  await afterGoogle(info);
 }
-async function finishOAuth(provider: string, codeEl: string) {
-  const code = $<HTMLInputElement>(codeEl).value.trim();
-  const state = oauthState.get(provider);
-  if (!code || !state) { toast(t('oauthCode')); return; }
-  await call({ op: 'account:oauthFinish', provider, code, codeVerifier: state.verifier, redirectUri: state.redirectUri });
-  oauthState.delete(provider);
-  toast(t('done'));
+
+async function afterGoogle(info: { email?: string; name?: string }): Promise<void> {
+  if (info.email || info.name) await call({ op: 'profile:set', username: info.name || info.email || '' });
+  toast('已使用 Google 登录：' + (info.email || info.name || ''));
+  const cfg = await call<{ hasLocalAccount: boolean }>({ op: 'config:get' });
+  if (!cfg.hasLocalAccount) {
+    const r = await modal('创建本地密码', '为这台设备上的 Diary 数据设置访问密码（至少 8 位）。忘记将无法恢复。', [{ name: 'next', label: t('password') }, { name: 'confirmation', label: t('confirmPasscode') }]);
+    if (r) await call({ op: 'account:setLocal', passcode: r.next! });
+  }
+  hideLock(); await refresh();
 }
-$('googleStart').onclick = action(() => startOAuth('google', 'googleClientId'));
-$('googleFinish').onclick = action(() => finishOAuth('google', 'googleCode'));
-$('microsoftStart').onclick = action(() => startOAuth('microsoft', 'microsoftClientId'));
-$('microsoftFinish').onclick = action(() => finishOAuth('microsoft', 'microsoftCode'));
+
+// settings: sign in / sign out
+$('googleLogin').onclick = action(() => loginWithGoogle());
+$('googleLogout').onclick = action(async () => {
+  if (!await modal(t('deleteEntry'), '退出 Google 登录会清除本机保存的登录态，需要时可重新登录。')) return;
+  await call({ op: 'account:clearOAuth', provider: 'google' });
+  await loadConfig(); toast(t('done'));
+});
+// Android manual fallback when the deep link does not fire
+$('googleFinish').onclick = action(async () => {
+  const code = $<HTMLInputElement>('googleCode').value.trim();
+  const state = [...oauthAndroidPending.keys()][0];
+  const pending = state ? oauthAndroidPending.get(state) : null;
+  if (!code || !state || !pending) { toast(t('oauthCode')); return; }
+  oauthAndroidPending.delete(state);
+  const res = await call<{ ok: boolean; email: string; name: string }>({ op: 'account:oauthFinish', provider: 'google', code, codeVerifier: pending.verifier, redirectUri: GOOGLE_ANDROID_REDIRECT });
+  await afterGoogle(res.ok ? res : { email: '', name: '' });
+});
 
 // ---------- Profile avatar ----------
 function pickFile(accept: string): Promise<File | null> {

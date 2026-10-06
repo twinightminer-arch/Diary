@@ -35,7 +35,7 @@ const rows = {
   done: ['操作完成', '操作完成', 'Done', '完了', '완료'],
   characters: ['字符', '字元', 'characters', '文字', '글자'],
   storage: ['存储位置', '儲存位置', 'Storage location', '保存先', '저장 위치'],
-  about: ['Diary 重制版 · 版本 0.1.0\nAGPL-3.0 · 数据仅存本机', 'Diary 重製版 · 版本 0.1.0\nAGPL-3.0 · 資料僅存本機', 'Diary Remastered · Version 0.1.0\nAGPL-3.0 · Local data', 'Diary リマスター · バージョン 0.1.0', 'Diary 리마스터 · 버전 0.1.0'],
+  about: ['Diary 重制版 · 版本 0.1.1\nAGPL-3.0 · 数据仅存本机', 'Diary 重製版 · 版本 0.1.1\nAGPL-3.0 · 資料僅存本機', 'Diary Remastered · Version 0.1.1\nAGPL-3.0 · Local data', 'Diary リマスター · バージョン 0.1.1', 'Diary 리마스터 · 버전 0.1.1'],
   importHint: ['导入的副本将保留原文件的加密状态。', '匯入的副本將保留原檔案的加密狀態。', 'The imported copy keeps its encryption state.', 'コピーは元の暗号化状態を保ちます。', '가져온 사본은 원래 암호화 상태를 유지합니다。'],
   // v0.2: AI, accounts, profile, media, batch
   settingsAi: ['AI 模型', 'AI 模型', 'AI model', 'AI モデル', 'AI 모델'],
@@ -55,7 +55,6 @@ const rows = {
   localAccountOff: ['未设置本地账户', '未設定本機帳戶', 'No local account', 'ローカルアカウントなし', '로컬 계정 없음'],
   clearAccount: ['清除本地账户', '清除本機帳戶', 'Clear local account', 'ローカルアカウント削除', '로컬 계정 삭제'],
   googleLogin: ['Google 登录', 'Google 登入', 'Google sign-in', 'Google サインイン', 'Google 로그인'],
-  microsoftLogin: ['Microsoft 登录', 'Microsoft 登入', 'Microsoft sign-in', 'Microsoft サインイン', 'Microsoft 로그인'],
   clientId: ['客户端 ID', '客戶端 ID', 'Client ID', 'クライアント ID', '클라이언트 ID'],
   oauthStart: ['开始授权', '開始授權', 'Start authorization', '認可を開始', '권한 시작'],
   oauthCode: ['粘贴回调授权码', '貼上回呼授權碼', 'Paste callback code', 'コールバックコード', '콜백 코드'],

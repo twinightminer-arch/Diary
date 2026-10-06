@@ -3,6 +3,8 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { join } from 'node:path';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { createServer } from 'node:http';
+import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { MarkdownEngine } from '../storage/markdown-engine.ts';
 import type { Request } from '../app/api.ts';
 import { HostConfig } from '../host/config.ts';
@@ -11,7 +13,8 @@ import { batchEncrypt, batchDecrypt, batchChangePasscode } from '../host/batch.t
 import { importMedia, listMedia, readMediaDataUrl, removeMedia } from '../host/media.ts';
 import {
   setLocalPasscode, verifyLocalPasscode, hasLocalAccount, clearLocalAccount,
-  buildAuthUrl, exchangeCode, type OAuthProvider,
+  buildAuthUrl, exchangeCode, googleUserInfo, googleClientId, GOOGLE_DESKTOP_CLIENT_SECRET,
+  type OAuthProvider,
 } from '../host/account.ts';
 
 app.setName('Diary');
@@ -35,6 +38,7 @@ else {
       media: config.media,
       hasLocalAccount: hasLocalAccount(config),
       oauthClients: config.raw.account.oauthClients,
+      oauth: config.raw.account.oauth,
     });
 
     ipcMain.handle('diary:call', async (event, request: Request) => {
@@ -83,18 +87,54 @@ else {
         case 'account:setLocal': { if (typeof passcode !== 'string') throw new Error('Passcode required'); await setLocalPasscode(config, passcode); return { ok: true }; }
         case 'account:verifyLocal': return { ok: typeof passcode === 'string' && await verifyLocalPasscode(config, passcode) };
         case 'account:clearLocal': clearLocalAccount(config); await config.save(); return { ok: true };
-        case 'account:oauthBegin': {
-          if (!provider || !clientId || !redirectUri || !state || !codeChallenge) throw new Error('OAuth params required');
-          config.setOAuthClient(provider, clientId); await config.save();
-          return { url: buildAuthUrl(provider as OAuthProvider, { clientId, redirectUri, state, codeChallenge }) };
-        }
-        case 'account:oauthFinish': {
-          if (!provider || !code || !codeVerifier || !redirectUri) throw new Error('OAuth finish params required');
-          const cid = config.getOAuthClient(provider);
-          if (!cid) throw new Error('OAuth client not registered');
-          const token = await exchangeCode(provider as OAuthProvider, { clientId: cid, code, codeVerifier, redirectUri });
-          config.setOAuth(provider, token.access_token); await config.save();
-          return { ok: true };
+        case 'account:clearOAuth': { if (!provider) throw new Error('Provider required'); config.setOAuth(provider, null); await config.save(); return { ok: true }; }
+        case 'account:oauthGoogle': {
+          // PKCE for a public client: verifier -> S256 challenge.
+          const verifier = randomBytes(43).toString('hex'); // 86 hex chars, within the 43-128 range
+          const challenge = createHash('sha256').update(verifier).digest('base64url');
+          const oauthState = randomUUID();
+          const clientId = googleClientId('desktop');
+          let redirectUri = '';
+          const codeReceived = new Promise<string>((resolve, reject) => {
+            const server = createServer((req, res) => {
+              try {
+                const parsed = new URL(req.url ?? '/', 'http://127.0.0.1');
+                if (parsed.searchParams.get('state') !== oauthState) { res.writeHead(400); res.end('state mismatch'); server.close(); return; }
+                const error = parsed.searchParams.get('error');
+                if (error) {
+                  res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
+                  res.end(`Google 授权失败：${error}`); reject(new Error(`Google 授权被拒绝：${error}`)); server.close(); return;
+                }
+                const code = parsed.searchParams.get('code');
+                if (!code) { res.writeHead(400); res.end('missing authorization code'); return; }
+                res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+                res.end('<html><head><meta charset="utf-8"><style>body{font-family:system-ui,sans-serif;padding:3rem;color:#333}</style></head>'
+                  + '<body><h2>Diary 登录成功 ✓</h2><p>您可以关闭此页面，并返回 Diary 应用继续。</p></body></html>');
+                resolve(code); server.close();
+              } catch {
+                res.writeHead(500); res.end('internal error'); server.close();
+              }
+            });
+            server.on('error', reject);
+            server.listen(0, '127.0.0.1', () => {
+              redirectUri = `http://127.0.0.1:${(server.address() as { port: number }).port}/oauth2callback`;
+              const authUrl = buildAuthUrl('google' as OAuthProvider, { clientId, redirectUri, state: oauthState, codeChallenge: challenge });
+              void shell.openExternal(authUrl);
+            });
+          });
+          const code = await Promise.race([
+            codeReceived,
+            new Promise<string>((_, reject) => setTimeout(() => reject(new Error('Google 登录超时（5 分钟），请在浏览器完成授权后重试。')), 5 * 60_000)),
+          ]);
+          const token = await exchangeCode('google' as OAuthProvider, {
+            clientId, code, codeVerifier: verifier, redirectUri, clientSecret: process.env.GOOGLE_DESKTOP_CLIENT_SECRET || GOOGLE_DESKTOP_CLIENT_SECRET,
+          });
+          config.setOAuth('google', token.access_token); await config.save();
+          let profile = { email: '', name: '', picture: '' };
+          try { profile = await googleUserInfo(token.access_token); } catch { /* non-fatal */ }
+          if (profile.name || profile.email) config.setProfile({ username: profile.name || profile.email });
+          await config.save();
+          return { email: profile.email, name: profile.name, picture: profile.picture, ok: true };
         }
         // ----- Profile -----
         case 'profile:get': return config.profile;

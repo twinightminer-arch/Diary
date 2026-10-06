@@ -1,26 +1,18 @@
-# Diary 重制版 0.1.0
+# Diary 重制版 0.1.1
 
 ## 桌面与 Android 应用
 
-现已提供 Windows 桌面界面和 Android 原生 WebView 外壳。重制版 0.1.0 采用“一办通”视觉体系重构应用，统一首页、AI 问答、AI 搜索、竞赛中心、办事指南和完整日记功能，并移除旧版校园办事案件模式。
-
-## 0.2.1 校园办事模式
-
-- 覆盖请假、奖助学金、宿舍报修、转专业、成绩证明和实习手续；可通过自然语言描述智能匹配事项。
-- 学生身份档案只存本机，用于自动填写姓名、学号、学校、学院、专业、年级、手机和邮箱。
-- 每类事项自动生成申请字段、材料清单和办理路线，可复制为完整 Markdown 申请表。
-- 多部门流程按环节分流，事项状态从待提交、办理中持续追踪到已完成。
-- 所有校园事项数据使用应用本地存储，不上传服务器；具体规则仍应以所在学校最新规定为准。
+现已提供 Windows 桌面界面和 Android 原生 WebView 外壳。重制版 0.1.1 采用“一办通”视觉体系重构应用，统一首页、AI 问答、AI 搜索、竞赛中心、办事指南和完整日记功能，并移除旧版校园办事案件模式。
 
 日记模式继续支持新建、编辑、搜索、删除、Markdown 预览、单篇与批量加密、导入导出、五种语言和深浅主题。
 
-v0.2.0 补齐的需求：
+## 功能特性
 
 - **AI 日记助手**：设置里接入任意 OpenAI 兼容接口或 DeepSeek，可撰写草稿、润色、取标题、续写、生成插图；密钥由本机逐机密钥加密保存。
 - **联网查询**：插入今天的日期、按经纬度查询天气、反查地点；页面本身 `connect-src 'none'`，联网一律由宿主完成。
 - **媒体**：导入图片/动图/视频（插图与日记背景）和音频（背景音乐），支持动画头像；媒体库可预览、插入正文或删除。
 - **逐篇与多篇加密**：侧栏多选后可一次性加密、解密或改密，密码需二次确认。
-- **账户**：本地口令锁屏（仅作访问拦截，PBKDF2 310k），或 Google / Microsoft 登录（PKCE）；可修改用户名、头像与个性签名。
+- **账户**：本地口令锁屏（仅作访问拦截，PBKDF2 310k），或 Google 登录（PKCE）；可修改用户名、头像与个性签名。
 
 日记与媒体始终保存在本机，没有云同步和插件商店。
 
@@ -54,7 +46,7 @@ src/
     skills.ts             # Host meta-skills: agent, media, web, layout
   host/
     config.ts             # Settings; per-install device key seals API keys
-    account.ts            # Local passcode gate; Google/Microsoft OAuth PKCE
+    account.ts            # Local passcode gate; Google OAuth PKCE
     media.ts              # Import, list, read and remove diary media
     batch.ts              # Encrypt, decrypt and re-key many entries at once
   security/

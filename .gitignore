@@ -7,3 +7,6 @@ android-build/
 .electron-cache/
 .npm-cache/
 work/
+releases/
+*.log
+*.idsig
