@@ -16,11 +16,18 @@ async function compile(directory) {
       fileName: source,
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: preload ? ts.ModuleKind.CommonJS : ts.ModuleKind.ESNext, rewriteRelativeImportExtensions: true, verbatimModuleSyntax: !preload },
     });
+    // Optionally inject the desktop OAuth client secret at build time so the
+    // repository never carries it (the constant stays empty in source).
+    let code = result.outputText;
+    const secret = process.env.GOOGLE_DESKTOP_CLIENT_SECRET;
+    if (secret && name === 'host/account.js') {
+      code = code.replace("GOOGLE_DESKTOP_CLIENT_SECRET = '';", `GOOGLE_DESKTOP_CLIENT_SECRET = ${JSON.stringify(secret)};`);
+    }
     await mkdir(dirname(output), { recursive: true });
-    await writeFile(output, result.outputText);
+    await writeFile(output, code);
     if (/^(app|i18n|security)\//.test(name) || name === 'storage/markdown.js') {
       const browser = join('dist/web', name);
-      await mkdir(dirname(browser), { recursive: true }); await writeFile(browser, result.outputText);
+      await mkdir(dirname(browser), { recursive: true }); await writeFile(browser, code);
     }
   }
 }

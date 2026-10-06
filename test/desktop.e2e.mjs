@@ -21,11 +21,19 @@ test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron
     app = await launch();
     let page = await app.firstWindow();
     page.on('pageerror', error => errors.push(error.message));
-    if (await page.locator('#lockScreen').isVisible()) {
-      if (await page.locator('#offlineCreate').isVisible()) {
-        await page.locator('#offlineCreate').click();
-        await page.locator('[name=next]').fill('local-test-123'); await page.locator('[name=confirmation]').fill('local-test-123'); await page.locator('#modalConfirm').click();
-      } else { await page.locator('#lockPasscode').fill('local-test-123'); await page.locator('#lockSubmit').click(); }
+    const lock = page.locator('#lockScreen');
+    let lockShown = false;
+    try { await lock.waitFor({ state: 'visible', timeout: 12000 }); lockShown = true; } catch { /* booted straight in */ }
+    if (lockShown) {
+      try { await page.screenshot({ path: '../releases/Diary-login.png', timeout: 8000 }); } catch { /* screenshot is best-effort */ }
+      await expect(page.locator('#offlineCreate')).toBeVisible();
+      await expect(page.locator('[data-login-provider="google"]')).toBeVisible();
+      await page.locator('#offlineCreate').click();
+      await page.locator('[name=username]').fill('lizhonghao');
+      await page.locator('[name=next]').fill('local-test-123');
+      await page.locator('[name=confirmation]').fill('local-test-123');
+      await page.locator('#modalConfirm').click();
+      await expect(lock).toBeHidden({ timeout: 15000 });
     }
     await page.locator('[data-view="diary"]').first().click();
     await expect(page.locator('#firstEntry')).toBeVisible();
@@ -37,7 +45,7 @@ test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron
     assert.equal((await readdir(join(home, 'journals'))).filter(name => name.endsWith('.md')).length, 1);
     await page.locator('#previewTab').click();
     await expect(page.locator('#preview h1')).toHaveText('九月的最后一天');
-    await page.screenshot({ path: '../releases/Diary-preview.png' });
+    try { await page.screenshot({ path: '../releases/Diary-preview.png', timeout: 8000 }); } catch { /* screenshot is best-effort */ }
     await page.locator('#editTab').click();
     await page.locator('#encrypt').click();
     await page.locator('[name=next]').fill('diary-test-123');
@@ -54,11 +62,14 @@ test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron
 
     app = await launch();
     page = await app.firstWindow(); page.on('pageerror', error => errors.push(error.message));
-    if (await page.locator('#lockScreen').isVisible()) {
-      if (await page.locator('#offlineCreate').isVisible()) {
-        await page.locator('#offlineCreate').click();
-        await page.locator('[name=next]').fill('local-test-123'); await page.locator('[name=confirmation]').fill('local-test-123'); await page.locator('#modalConfirm').click();
-      } else { await page.locator('#lockPasscode').fill('local-test-123'); await page.locator('#lockSubmit').click(); }
+    const lock2 = page.locator('#lockScreen');
+    let lockShown2 = false;
+    try { await lock2.waitFor({ state: 'visible', timeout: 12000 }); lockShown2 = true; } catch { /* remembered session skipped the lock */ }
+    if (lockShown2) {
+      await page.locator('#authUsername').fill('lizhonghao');
+      await page.locator('#authPasscode').fill('local-test-123');
+      await page.locator('#authSubmit').click();
+      await expect(lock2).toBeHidden({ timeout: 15000 });
     }
     await page.locator('[data-view="diary"]').first().click();
     await page.locator('.entry-card').click();

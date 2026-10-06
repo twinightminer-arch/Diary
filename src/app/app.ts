@@ -4,8 +4,10 @@ import type { Entry, EntrySummary, MarkdownDocument } from './api.ts';
 import { locale, t } from './copy.ts';
 import { decryptContent, isEncrypted } from '../security/encryption.ts';
 import { parseMarkdown } from '../storage/markdown.ts';
-import { advanceCampusCase, applicationText, campusServices, createCampusCase, matchCampusService } from './campus.ts';
-import type { CampusCase, CampusProfile, CampusService } from './campus.ts';
+import { mountPortal, setPortalIdentity, setPortalNavigator, setPortalPlugins } from './portal.ts';
+import type { PortalViewName } from './portal.ts';
+import { weatherMetrics, weatherToMarkdown } from './weather.ts';
+import type { WeatherOk, WeatherReport } from './weather.ts';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const title = $<HTMLInputElement>('title'), editor = $<HTMLTextAreaElement>('editor');
@@ -14,9 +16,7 @@ let entries: (EntrySummary & { title: string; snippet: string })[] = [];
 let toastTimer: ReturnType<typeof setTimeout>;
 let unlocked = true;
 let selected = new Set<string>();
-let appMode: 'diary' | 'campus' = localStorage.getItem('diary.mode') === 'campus' ? 'campus' : 'diary';
-let activeCaseId: string | null = null;
-type Field = { name: string; label: string; type?: string; options?: [string, string][] };
+type Field = { name: string; label: string; type?: string; options?: [string, string][]; required?: boolean };
 function modal(heading: string, message = '', fields: Field[] = []): Promise<Record<string, string> | null> {
   const dialog = $<HTMLDialogElement>('modal');
   $('modalTitle').textContent = heading; $('modalMessage').textContent = message;
@@ -25,7 +25,7 @@ function modal(heading: string, message = '', fields: Field[] = []): Promise<Rec
     const label = document.createElement('label'); label.textContent = field.label;
     const input = document.createElement(field.options ? 'select' : 'input') as HTMLInputElement | HTMLSelectElement;
     input.name = field.name;
-    if (input instanceof HTMLInputElement) { input.type = field.type ?? 'password'; input.required = true; input.autocomplete = 'off'; }
+    if (input instanceof HTMLInputElement) { input.type = field.type ?? 'password'; input.required = field.required !== false; input.autocomplete = 'off'; }
     if (field.options) {
       for (const [value, text] of field.options) { const option = document.createElement('option'); option.value = value; option.textContent = text; input.append(option); }
       input.value = locale.locale;
@@ -59,7 +59,9 @@ function localizedError(error: unknown): string {
 }
 function action(operation: () => Promise<unknown>) {
   return async () => {
-    if (busy) return;
+    // Never swallow a click silently: an in-flight operation used to make every
+    // later button appear dead, which is indistinguishable from a crash.
+    if (busy) { toast('请稍等，上一个操作还在进行中…'); return; }
     busy = true;
     try { await operation(); } catch (error) { toast(localizedError(error)); }
     finally { busy = false; }
@@ -70,7 +72,7 @@ function translate() {
   document.querySelectorAll<HTMLElement>('[data-i]').forEach(element => { element.textContent = t(element.dataset.i!); });
   document.querySelectorAll<HTMLInputElement>('[data-placeholder]').forEach(element => { element.placeholder = t(element.dataset.placeholder!); });
   $('breadcrumbDate').textContent = locale.date(Date.now(), { month: 'long', day: 'numeric', weekday: 'long' });
-  renderList(); renderServices(campusServices); renderCaseList(); status();
+  renderList(); status();
 }
 function status() {
   $('saveState').textContent = t(dirty ? 'unsaved' : 'saved');
@@ -189,99 +191,408 @@ function view(preview: boolean) {
   if (preview) renderMarkdown();
 }
 
-// ---------- Lock screen & accounts ----------
+// ---------- Lock screen & accounts (QQ-style) ----------
+type AccountSummary = { id: string; username: string; displayName: string; avatar: string | null; googleEmail: string | null; autoLogin: boolean; hasRecovery: boolean };
+type BackgroundState = {
+  kind: 'image' | 'video' | 'wallpaper' | null;
+  media: string | null;
+  wallpaper: { path: string; title: string; animated: boolean } | null;
+  fit: 'cover' | 'contain' | 'tile' | 'center';
+  dim: number; blur: number;
+};
+type BuiltinPlugin = { id: string; name: string; description: string; version: string; kind: 'builtin'; enabled: boolean };
+type PluginList = {
+  builtin: BuiltinPlugin[];
+  external: { file: string; id: string; label: string; baseUrl: string; model: string; custom: boolean }[];
+  errors: { file: string; message: string }[];
+  directory: string;
+};
+type Snapshot = {
+  activeProvider: string; providers: { id: string; baseUrl: string; model: string; hasKey: boolean }[];
+  profile: { username: string; avatar: string | null; signature: string };
+  media: { background: BackgroundState; bgm: string | null };
+  background: BackgroundState;
+  permissions: { network: boolean; location: boolean };
+  location: { mode: 'auto' | 'manual'; lat: number | null; lon: number | null; label: string };
+  wallpaperDir: string | null;
+  builtinPlugins: BuiltinPlugin[];
+  users: AccountSummary[];
+  currentUser: { id: string; username: string; displayName: string; avatar: string | null; googleEmail: string | null } | null;
+  remember: boolean;
+  google: { googleId: string; email: string; name: string; picture: string | null } | null;
+  oauthClients: Record<string, string>;
+  plugins: { file: string; id: string; label: string; baseUrl: string; model: string; custom: boolean }[];
+  pluginErrors: { file: string; message: string }[];
+  pluginDirectory: string;
+};
+let lastSnapshot: Snapshot | null = null;
+
+/**
+ * Paint an avatar slot. Every slot owns exactly two nodes — an <img> and an
+ * initial-letter fallback — and they are mutually exclusive by contract. The
+ * "two avatars on one page" defect came from both nodes being visible at once
+ * (the container is a grid, so the initial was laid out *below* the picture and
+ * spilled out of the 76px circle).
+ */
+function setAvatar(img: HTMLImageElement | null, fallback: HTMLElement | null, url: string | null, name: string): void {
+  if (fallback) fallback.textContent = (name.trim()[0] || 'D').toLocaleUpperCase();
+  if (!img) return;
+  if (url) {
+    img.src = url;
+    img.hidden = false;
+    if (fallback) fallback.hidden = true;
+  } else {
+    img.removeAttribute('src');
+    img.hidden = true;
+    if (fallback) fallback.hidden = false;
+  }
+}
+
+/**
+ * Avatars are stored either as a `data:` URL (Google login caches the picture
+ * that way because the CSP forbids remote images) or as a media id (local
+ * upload). Normalise both to something an <img> can actually load.
+ */
+async function resolveAvatar(value: string | null | undefined): Promise<string | null> {
+  if (!value) return null;
+  if (value.startsWith('data:') || value.startsWith('blob:')) return value;
+  return await call<string>({ op: 'media:data', id: value }).catch(() => '') || null;
+}
+
+/** Render the signed-in avatar + name into the lock card header. */
+function paintIdentity(target: 'login' | 'setting', snapshot: Snapshot | null): void {
+  const user = snapshot?.currentUser ?? null;
+  const google = snapshot?.google ?? null;
+  const name = user?.displayName || google?.name || '';
+  const avatar = user?.avatar || google?.picture || null;
+  if (target === 'setting') {
+    $('accountState').textContent = user ? `当前账户：${user.displayName}（${user.username}）` : '未登录';
+    const signedIn = Boolean(user);
+    $('googleState').textContent = signedIn
+      ? `已登录：${user!.displayName}${user!.googleEmail ? ` · ${user!.googleEmail}` : ''}`
+      : '尚未使用 Google 登录';
+    $('googleLogin').hidden = Boolean(google);
+    $('googleLogout').hidden = !google;
+    $('accountSet').hidden = !user;
+    $('accountChangePwd').hidden = !user;
+    $('accountRecovery').hidden = !user;
+    return;
+  }
+  const nameEl = $('loginIdentityName'), avatarEl = $<HTMLImageElement>('loginIdentityAvatar');
+  nameEl.textContent = name;
+  // Remote http(s) pictures are unrenderable under the app CSP; treat them as
+  // "no avatar" so the lock card falls back to the logo instead of a broken img.
+  const usable = avatar && !/^https?:/i.test(avatar) ? avatar : null;
+  setAvatar(avatarEl, null, usable, name);
+}
+
+/** QQ-style quick account picker: click a saved user to fill the username. */
+function renderAccountChips(snapshot: Snapshot | null): void {
+  const box = $('accountChips');
+  const users = snapshot?.users ?? [];
+  box.replaceChildren();
+  if (!users.length) { box.hidden = true; return; }
+  box.hidden = false;
+  const currentId = snapshot?.currentUser?.id ?? null;
+  for (const user of users) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'account-chip' + (user.id === currentId ? ' active' : '');
+    chip.textContent = user.displayName && user.displayName !== user.username
+      ? `${user.displayName} (@${user.username})` : `@${user.username}`;
+    chip.onclick = () => {
+      ($('authUsername') as HTMLInputElement).value = user.username;
+      ($('authPasscode') as HTMLInputElement).focus();
+    };
+    box.append(chip);
+  }
+}
+
 function showLock(firstTime = false) {
   unlocked = false;
   $('lockScreen').hidden = false;
-  $('lockHint').textContent = firstTime ? '选择登录方式，或创建仅保存在此设备上的本地账户。' : t('unlockHint');
-  $('loginMethods').hidden = !firstTime;
-  $('localLogin').hidden = firstTime;
-  ($('lockPasscode') as HTMLInputElement).value = '';
-  if (!firstTime) ($('lockPasscode') as HTMLInputElement).focus();
+  // Sign-in methods (Google + offline account) are always reachable, so a
+  // returning user can still switch method or create another account.
+  $('loginMethods').hidden = false;
+  const hasUsers = (lastSnapshot?.users.length ?? 0) > 0;
+  $('authPanel').hidden = !hasUsers || firstTime;
+  $('loginDivider').hidden = !hasUsers || firstTime;
+  $('lockHint').textContent = firstTime ? '选择登录方式，或创建一个仅保存在此设备上的账户' : '登录以继续你的私密日记';
+  ($('authPasscode') as HTMLInputElement).value = '';
+  renderAccountChips(lastSnapshot);
+  paintIdentity('login', lastSnapshot);
+  if (hasUsers && !firstTime) {
+    const preferred = lastSnapshot?.currentUser?.username ?? lastSnapshot?.users[0]?.username ?? '';
+    ($('authUsername') as HTMLInputElement).value = preferred;
+    ($('authPasscode') as HTMLInputElement).focus();
+  }
+  void refreshSnapshot();
 }
 function hideLock() { unlocked = true; $('lockScreen').hidden = true; }
-async function unlockWith(passcode: string): Promise<boolean> {
-  const result = await call<{ ok: boolean }>({ op: 'account:verifyLocal', passcode });
-  if (result.ok) { hideLock(); return true; }
-  toast(t('wrongPassword')); return false;
+
+/** QQ-style profile card: avatar, nickname, @username and Google binding chip. */
+function paintProfileCard(snapshot: Snapshot | null): void {
+  const user = snapshot?.currentUser ?? null;
+  const google = snapshot?.google ?? null;
+  const name = user?.displayName || snapshot?.profile.username || '本地用户';
+  $('profileCardName').textContent = name;
+  $('profileCardUsername').textContent = user ? `@${user.username}` : (google ? `@${google.email.split('@')[0]}` : '@—');
+  const chip = $('profileCardGoogle');
+  const mail = $('profileCardMail');
+  const email = user?.googleEmail || google?.email || '';
+  chip.hidden = !email;
+  if (email) { mail.hidden = false; mail.textContent = email; } else mail.hidden = true;
+  // Visibility of the initial is owned by setAvatar(); only the letter is set here.
+  $('profileAvatarInitial').textContent = (name.trim()[0] || 'D').toLocaleUpperCase();
 }
-$('lockSubmit').onclick = action(async () => {
-  const passcode = ($('lockPasscode') as HTMLInputElement).value;
-  if (!passcode) return;
-  await unlockWith(passcode);
+
+async function refreshSnapshot(): Promise<Snapshot | null> {
+  try { lastSnapshot = await call<Snapshot>({ op: 'account:list' }); paintIdentity('login', lastSnapshot); return lastSnapshot; }
+  catch { return lastSnapshot; }
+}
+
+/** Shared success path after Google sign-in or account creation. */
+async function afterGoogle(info: { email?: string; name?: string; picture?: string | null }): Promise<void> {
+  // The host already stored the Google identity and profile; just re-read state.
+  await refreshSnapshot();
+  const name = lastSnapshot?.currentUser?.displayName ?? info.name ?? info.email ?? '';
+  hideLock(); await loadConfig(); await refresh();
+  toast(`已登录：${name}`);
+}
+
+// ---- sign in ----
+$('authSubmit').onclick = action(async () => {
+  const username = ($('authUsername') as HTMLInputElement).value.trim();
+  const passcode = ($('authPasscode') as HTMLInputElement).value;
+  const remember = ($('authRemember') as HTMLInputElement).checked;
+  if (!username) { toast('请输入用户名'); return; }
+  if (!passcode) { toast('请输入密码'); return; }
+  await call({ op: 'account:signIn', username, passcode, remember });
+  await refreshSnapshot();
+  hideLock(); await loadConfig(); await refresh();
+  toast('登录成功');
 });
-$('lockSet').onclick = action(async () => {
-  const passcode = ($('lockPasscode') as HTMLInputElement).value;
-  if (passcode.length < 4) { toast(t('passwordShort')); return; }
-  await call({ op: 'account:setLocal', passcode });
-  hideLock(); toast(t('done')); await refresh();
-});
-$('lockClear').onclick = action(async () => {
-  if (!await modal(t('deleteEntry'), t('deleteHint'))) return;
-  await call({ op: 'account:clearLocal' });
-  toast(t('done'));
-});
-$('lockNow').onclick = () => showLock(false);
-$('lockPasscode').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); $('lockSubmit').click(); } });
+$('authPasscode').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); $('authSubmit').click(); } });
+
+// ---- create offline account ----
 $('offlineCreate').onclick = action(async () => {
-  const response = await modal('创建本地离线账户', '密码至少 8 位，用于保护此设备上的 Diary 数据。', [{ name: 'next', label: '本地密码' }, { name: 'confirmation', label: '确认密码' }]);
-  if (!response) return;
-  await call({ op: 'account:setLocal', passcode: response.next! });
-  hideLock(); await refresh(); toast('本地账户已创建');
+  const r = await modal('创建本地离线账户', '设置一个专属用户名和密码。同一台设备上的每个用户互相独立，资料互不相见。', [
+    { name: 'username', label: '用户名（2-20 位中英文/数字/下划线）', type: 'text' },
+    { name: 'nickname', label: '昵称（可选）', type: 'text', required: false },
+    { name: 'next', label: '密码（至少 6 位）' },
+    { name: 'confirmation', label: '确认密码' },
+  ]);
+  if (!r) return;
+  await call({
+    op: 'account:create', username: r.username ?? '', displayName: r.nickname || r.username || '',
+    passcode: r.next ?? '', confirmation: r.confirmation ?? '', remember: true,
+  });
+  await refreshSnapshot();
+  hideLock(); await loadConfig(); await refresh();
+  toast(`本地账户「${r.nickname || r.username}」已创建`);
 });
-$('backToMethods').onclick = () => { $('localLogin').hidden = true; $('loginMethods').hidden = false; };
+
+// ---- forgot password (security question) ----
+$('authForgot').onclick = action(async () => {
+  const users = lastSnapshot?.users ?? [];
+  if (!users.length) { toast('没有可找回的账户'); return; }
+  const options: [string, string][] = users.map(u => [u.id, `${u.displayName}（${u.username}）`]);
+  const pick = await modal('找回密码', '选择要找回的账户，然后回答密保问题重置密码。', [
+    { name: 'id', label: '账户', options },
+    { name: 'answer', label: '密保答案' },
+    { name: 'next', label: '新密码（至少 6 位）' },
+    { name: 'confirmation', label: '确认新密码' },
+  ]);
+  if (!pick) return;
+  const target = users.find(u => u.id === pick.id);
+  if (!target?.hasRecovery) { toast('该账户未设置密保问题，无法找回'); return; }
+  await call({ op: 'account:recover', id: pick.id ?? '', answer: pick.answer ?? '', next: pick.next ?? '', confirmation: pick.confirmation ?? '' });
+  toast('密码已重置，请用新密码登录');
+});
+
+$('lockNow').onclick = () => showLock(false);
 document.querySelectorAll<HTMLButtonElement>('[data-login-provider]').forEach(button => {
   button.onclick = action(async () => {
     const provider = button.dataset.loginProvider;
-    if (provider === 'google') await loginWithGoogle();
-    else toast('该登录方式已移除，请使用 Google 或本地账户。');
+    if (provider === 'google') {
+      // Keep the reason on the lock card, not in a toast that disappears.
+      $('lockHint').textContent = '已打开浏览器，请在浏览器中完成 Google 授权…';
+      try {
+        await loginWithGoogle();
+      } catch (error) {
+        const message = localizedError(error);
+        $('lockHint').textContent = `Google 登录失败：${message}`;
+        throw error;
+      }
+    } else toast('该登录方式已移除，请使用 Google 或本地账户。');
   });
 });
 
 // ---------- Settings panel ----------
+/** Lists AI plugins discovered on disk, plus where to drop new ones. */
+function renderPlugins(cfg: Snapshot): void {
+  const host = $('aiPlugins');
+  host.hidden = false;
+  host.replaceChildren();
+  const title = document.createElement('strong');
+  title.textContent = cfg.plugins.length ? `已加载 ${cfg.plugins.length} 个 AI 插件` : 'AI 插件';
+  host.append(title);
+  for (const plugin of cfg.plugins) {
+    const row = document.createElement('div');
+    row.className = 'ai-plugin-row';
+    const name = document.createElement('b'); name.textContent = plugin.label;
+    const code = document.createElement('code'); code.textContent = plugin.id;
+    const note = document.createElement('small');
+    note.textContent = plugin.custom ? '自定义传输' : plugin.baseUrl || '未设置服务地址';
+    row.append(name, code, note);
+    host.append(row);
+  }
+  for (const problem of cfg.pluginErrors) {
+    const row = document.createElement('div');
+    row.className = 'ai-plugin-row bad';
+    row.textContent = `插件加载失败：${problem.file} — ${problem.message}`;
+    host.append(row);
+  }
+  const hint = document.createElement('p');
+  hint.className = 'hint';
+  hint.textContent = '把 .mjs 插件放进 Diary 数据目录的 plugins 文件夹，重启后即会出现在上方并可被选中。';
+  host.append(hint);
+}
+
 async function loadConfig() {
-  const cfg = await call<{
-    activeProvider: string; providers: { id: string; baseUrl: string; model: string; hasKey: boolean }[];
-    profile: { username: string; avatar: string | null; signature: string };
-    media: { background: string | null; bgm: string | null };
-    hasLocalAccount: boolean; oauthClients: Record<string, string>; oauth: Record<string, string>;
-  }>({ op: 'config:get' });
+  const cfg = await call<Snapshot>({ op: 'config:get' });
+  lastSnapshot = cfg;
   const sel = $<HTMLSelectElement>('cfgProvider'); sel.replaceChildren();
   for (const p of cfg.providers) { const opt = document.createElement('option'); opt.value = p.id; opt.textContent = `${p.id} · ${p.model || p.baseUrl}`; sel.append(opt); }
   sel.value = cfg.activeProvider;
   $<HTMLInputElement>('cfgBaseUrl').value = cfg.providers.find(p => p.id === cfg.activeProvider)?.baseUrl ?? '';
   $<HTMLInputElement>('cfgModel').value = cfg.providers.find(p => p.id === cfg.activeProvider)?.model ?? '';
   $<HTMLInputElement>('cfgApiKey').value = '';
+  renderPlugins(cfg);
   $<HTMLInputElement>('profileUsername').value = cfg.profile.username;
   $<HTMLInputElement>('profileSignature').value = cfg.profile.signature;
-  $('userName').textContent = cfg.profile.username.trim() || '本地用户';
-  $('userAvatar').textContent = (cfg.profile.username.trim()[0] || 'D').toLocaleUpperCase();
-  $('accountState').textContent = cfg.hasLocalAccount ? t('localAccountOn') : t('localAccountOff');
-  $('lockNow').hidden = !cfg.hasLocalAccount;
-  const signedIn = Boolean(cfg.oauth && cfg.oauth.google);
-  $('googleState').textContent = signedIn ? `已使用 Google 登录：${cfg.oauth.google}` : '尚未使用 Google 登录';
-  $('googleLogin').hidden = signedIn;
-  $('googleLogout').hidden = !signedIn;
-  const student = campusProfile();
-  $<HTMLInputElement>('studentName').value = student.name; $<HTMLInputElement>('studentId').value = student.studentId;
-  $<HTMLInputElement>('studentSchool').value = student.school; $<HTMLInputElement>('studentCollege').value = student.college;
-  $<HTMLInputElement>('studentMajor').value = student.major; $<HTMLInputElement>('studentGrade').value = student.grade;
-  $<HTMLInputElement>('studentPhone').value = student.phone; $<HTMLInputElement>('studentEmail').value = student.email;
-  if (cfg.profile.avatar) {
-    const url = await call<string>({ op: 'media:data', id: cfg.profile.avatar });
-    const img = $<HTMLImageElement>('profileAvatarPreview'); img.src = url; img.hidden = false;
-  }
-  await applyMedia(cfg.media);
+  // The signed-in account is the source of truth for every avatar & name slot.
+  const identity = cfg.currentUser;
+  const displayName = identity?.displayName || cfg.profile.username.trim() || '本地用户';
+  $('userName').textContent = displayName;
+  paintIdentity('setting', cfg);
+  paintProfileCard(cfg);
+  $('lockNow').hidden = !identity;
+  // The portal home screen greets whoever is signed in.
+  setPortalIdentity(displayName || '同学');
+  // Google avatars arrive as data URLs; locally uploaded ones are media ids.
+  const avatarUrl = await resolveAvatar(cfg.currentUser?.avatar ?? cfg.profile.avatar);
+  setAvatar($<HTMLImageElement>('avatarImg'), $('userAvatar'), avatarUrl, displayName);
+  setAvatar($<HTMLImageElement>('profileAvatarPreview'), $('profileAvatarInitial'), avatarUrl, displayName);
+  applyBackground(cfg.background);
+  applyBgm(cfg.media);
+  renderBackgroundPanel(cfg.background);
+  renderPermissionState(cfg);
+  applyPluginVisibility(cfg);
   await renderGallery();
 }
-function applyMedia(media: { background: string | null; bgm: string | null }) {
-  if (media.background) {
-    call<string>({ op: 'media:data', id: media.background })
-      .then(url => { document.body.style.setProperty('--diary-bg', `url(${JSON.stringify(url)})`); document.body.classList.add('has-bg'); })
-      .catch(() => undefined);
-  } else {
-    document.body.style.removeProperty('--diary-bg'); document.body.classList.remove('has-bg');
+
+/**
+ * Re-renders the screen the user is on. Needed after a settings change that
+ * the current screen depends on — activateView() is a no-op when the view has
+ * not changed, so switching the network on would otherwise leave a stale
+ * "weather offline" card on the home screen.
+ */
+function repaintActiveView(): void { if (activeView) mountPortal(activeView); }
+
+// Portal screens write into the vault too (weather import), so they ask the
+// diary shell to re-read the entry list instead of duplicating its cache.
+window.addEventListener('diary-entries-changed', () => { void refresh(); });
+
+/** Off means off: a disabled built-in plugin leaves the shell, for real. */
+function applyPluginVisibility(cfg: Snapshot): void {
+  const disabled = cfg.builtinPlugins.filter(plugin => !plugin.enabled).map(plugin => plugin.id);
+  setPortalPlugins(disabled);
+  const off = (id: string) => disabled.includes(id);
+
+  const showView = (view: string, visible: boolean) => {
+    const button = document.querySelector<HTMLElement>(`#primaryNav [data-view="${view}"]`);
+    if (button) button.hidden = !visible;
+  };
+  showView('chat', !off('ai-agent'));
+  showView('search-view', !off('ai-agent'));
+  showView('competition', !off('competition'));
+  showView('guide', !off('campus'));
+
+  // The wallpaper plugin owns the background tab and the background itself.
+  const mediaTab = document.querySelector<HTMLElement>('.settings-tabs [data-tab="media"]');
+  if (mediaTab) mediaTab.hidden = off('wallpaper');
+  if (off('wallpaper')) {
+    const mediaPanel = document.querySelector<HTMLElement>('[data-tabpanel="media"]');
+    if (mediaPanel) mediaPanel.hidden = true;
+    if (mediaTab?.classList.contains('active')) {
+      $('settingsPanel').querySelectorAll<HTMLElement>('.settings-tabs button').forEach(button => { if (!button.hidden) button.click(); });
+    }
+    applyBackground({ kind: null, media: null, wallpaper: null, fit: 'cover', dim: 0, blur: 0 });
   }
+
+  // Never strand the user on a screen whose entry point just vanished.
+  const activeNav = document.querySelector<HTMLElement>('#primaryNav .nav-item.active');
+  if (activeNav?.hidden) activateView('home');
+}
+// ---------- Background (the built-in wallpaper plugin) ----------
+const VIDEO_FILE = /\.(mp4|webm|mov|mkv|avi)$/i;
+
+/** Tokens let a path with spaces or CJK characters survive a URL untouched. */
+function toToken(absolutePath: string): string {
+  const bytes = new TextEncoder().encode(absolutePath);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+}
+/** Imported media and wallpaper files are streamed, never inlined as base64. */
+function schemeUrl(kind: 'media' | 'wallpaper', token: string): string {
+  return `diary-wallpaper://${kind}/${token}`;
+}
+
+let backgroundRun = 0;
+/**
+ * Paints the active background. Stills use a <div> so 平铺/居中 are possible;
+ * clips use a <video> so a 500 MB wallpaper stays a stream instead of a data URL.
+ */
+function applyBackground(bg: BackgroundState): void {
+  const run = ++backgroundRun;
+  const image = $('bgImage'), video = $<HTMLVideoElement>('bgVideo'), dim = $('bgDimLayer');
+  video.pause(); video.removeAttribute('src'); video.hidden = true;
+  image.hidden = true; image.style.backgroundImage = '';
+  dim.hidden = true; dim.style.opacity = '0';
+  document.body.classList.remove('has-bg');
+  document.documentElement.style.setProperty('--bg-blur', '0px');
+  if (!bg.kind) return;
+
+  const source = bg.kind === 'wallpaper' ? (bg.wallpaper?.path ?? '') : (bg.media ?? '');
+  if (!source) return;
+  const url = bg.kind === 'wallpaper' ? schemeUrl('wallpaper', toToken(source)) : schemeUrl('media', source);
+  const isVideo = VIDEO_FILE.test(source);
+
+  document.documentElement.style.setProperty('--bg-blur', `${Math.max(0, bg.blur)}px`);
+  dim.hidden = false;
+  dim.style.opacity = String(Math.min(1, Math.max(0, bg.dim)));
+  document.body.classList.add('has-bg');
+  if (run !== backgroundRun) return;
+
+  if (isVideo) {
+    video.src = url;
+    video.style.objectFit = bg.fit === 'contain' ? 'contain' : 'cover';
+    video.hidden = false;
+    video.load();
+    void video.play().catch(() => undefined);
+    return;
+  }
+  image.style.backgroundImage = `url("${url}")`;
+  image.style.backgroundSize = bg.fit === 'contain' ? 'contain' : bg.fit === 'center' || bg.fit === 'tile' ? 'auto' : 'cover';
+  image.style.backgroundRepeat = bg.fit === 'tile' ? 'repeat' : 'no-repeat';
+  image.style.backgroundPosition = 'center';
+  image.hidden = false;
+}
+
+/** The background music track lives outside the wallpaper plugin on purpose. */
+function applyBgm(media: { bgm: string | null }): void {
   const player = $<HTMLAudioElement>('bgmPlayer');
   if (media.bgm) {
     call<string>({ op: 'media:data', id: media.bgm })
@@ -289,15 +600,39 @@ function applyMedia(media: { background: string | null; bgm: string | null }) {
       .catch(() => undefined);
   } else { player.pause(); player.removeAttribute('src'); }
 }
+
+/** Reflects the saved background in the settings preview card and its controls. */
+function renderBackgroundPanel(bg: BackgroundState): void {
+  const still = $<HTMLElement>('bgPreviewImage'), clip = $<HTMLVideoElement>('bgPreviewVideo');
+  const empty = $('bgPreviewEmpty'), label = $('bgPreviewLabel');
+  still.hidden = true; still.style.backgroundImage = '';
+  clip.pause(); clip.removeAttribute('src'); clip.hidden = true;
+  const source = bg.kind === 'wallpaper' ? (bg.wallpaper?.path ?? '') : (bg.media ?? '');
+  label.textContent = bg.kind === 'wallpaper' ? `Wallpaper · ${bg.wallpaper?.title ?? ''}` : bg.kind === 'video' ? '本地视频' : bg.kind === 'image' ? '本地图片／动图' : '';
+  empty.hidden = Boolean(bg.kind);
+  if (source) {
+    const url = bg.kind === 'wallpaper' ? schemeUrl('wallpaper', toToken(source)) : schemeUrl('media', source);
+    if (VIDEO_FILE.test(source)) { clip.src = url; clip.hidden = false; void clip.play().catch(() => undefined); }
+    else { still.style.backgroundImage = `url("${url}")`; still.hidden = false; }
+  }
+  ($('bgFit') as HTMLSelectElement).value = bg.fit;
+  ($('bgDim') as HTMLInputElement).value = String(Math.round(bg.dim * 100));
+  ($('bgBlur') as HTMLInputElement).value = String(Math.round(bg.blur));
+  $('bgDimValue').textContent = `${Math.round(bg.dim * 100)}%`;
+  $('bgBlurValue').textContent = `${Math.round(bg.blur)}px`;
+}
 /** Renders the imported-media gallery: click a tile to insert it, × to delete it. */
 async function renderGallery() {
   const list = await call<{ id: string; name: string; mime: string; size: number }[]>({ op: 'media:list' });
-  const gallery = $('mediaGallery'); gallery.replaceChildren();
+  const gallery = $('mediaGallery');
+  gallery.replaceChildren();
+  gallery.hidden = list.length === 0;
   for (const item of list) {
     const tile = document.createElement('button');
     tile.title = `${item.name} · ${Math.max(1, Math.round(item.size / 1024))} KB`;
-    if (item.size <= 8 * 1024 * 1024 && (item.mime.startsWith('image') || item.mime.startsWith('video'))) {
-      const url = await call<string>({ op: 'media:data', id: item.id });
+    if (item.mime.startsWith('image') || item.mime.startsWith('video')) {
+      // Stream the file over the media scheme — a 200 MB clip must never be base64'd.
+      const url = schemeUrl('media', item.id);
       const thumb = item.mime.startsWith('video') ? document.createElement('video') : document.createElement('img');
       thumb.src = url;
       if (thumb instanceof HTMLVideoElement) { thumb.muted = true; thumb.preload = 'metadata'; }
@@ -316,8 +651,10 @@ async function renderGallery() {
       void action(async () => { await call({ op: 'media:remove', id: item.id }); await renderGallery(); })();
     };
     tile.onclick = action(async () => {
+      if (item.size > 8 * 1024 * 1024) { toast('这个文件太大，无法嵌入日记正文'); return; }
       const url = await call<string>({ op: 'media:data', id: item.id });
-      insertText(`![${item.name}](${url})`); toast(t('done'));
+      insertText(`![${item.name}](${url})`);
+      toast(t('done'));
     });
     tile.append(caption, remove); gallery.append(tile);
   }
@@ -336,13 +673,43 @@ document.querySelectorAll<HTMLButtonElement>('.settings-tabs button').forEach(bu
 $('cfgSave').onclick = action(async () => {
   const id = $<HTMLSelectElement>('cfgProvider').value;
   const key = $<HTMLInputElement>('cfgApiKey').value;
-  const result = await call({ op: 'config:setProvider', id, baseUrl: $<HTMLInputElement>('cfgBaseUrl').value, model: $<HTMLInputElement>('cfgModel').value, ...(key ? { next: key } : {}) });
-  await applyMedia((result as { media: { background: string | null; bgm: string | null } }).media);
+  await call({ op: 'config:setProvider', id, baseUrl: $<HTMLInputElement>('cfgBaseUrl').value, model: $<HTMLInputElement>('cfgModel').value, ...(key ? { next: key } : {}) });
+  await loadConfig();
   toast(t('done'));
 });
+// A dead end with no explanation is the worst outcome, so the panel can prove
+// the backend really answers instead of leaving the user to guess.
+$('cfgTest').onclick = action(async () => {
+  const out = $('cfgTestResult');
+  out.className = 'ai-status pending';
+  out.textContent = '正在测试，请稍候…';
+  const result = await call<{ ok: boolean; ms: number; provider: string; model: string; detail: string }>({ op: 'agent:probe' });
+  out.className = `ai-status ${result.ok ? 'ok' : 'bad'}`;
+  out.textContent = result.ok
+    ? `✓ ${result.provider} · ${result.model} · ${result.ms} ms · 回复「${result.detail}」`
+    : `✗ ${result.provider} · ${result.model}：${result.detail}`;
+});
 $('cfgLocale').onchange = () => { locale.setLocale($<HTMLSelectElement>('cfgLocale').value); localStorage.setItem('diary.locale', locale.locale); translate(); };
-$('accountSet').onclick = action(async () => { const r = await modal(t('setPasscode'), t('encryptHint'), [{ name: 'next', label: t('password') }, { name: 'confirmation', label: t('confirmPasscode') }]); if (r) { await call({ op: 'account:setLocal', passcode: r.next! }); await loadConfig(); toast(t('done')); } });
-$('accountClear').onclick = action(async () => { if (!await modal(t('deleteEntry'), t('deleteHint'))) return; await call({ op: 'account:clearLocal' }); await loadConfig(); toast(t('done')); });
+$('accountChangePwd').onclick = action(async () => {
+  const r = await modal('修改密码', '输入原密码后设置新密码。', [
+    { name: 'passcode', label: '原密码' },
+    { name: 'next', label: '新密码（至少 6 位）' },
+    { name: 'confirmation', label: '确认新密码' },
+  ]);
+  if (!r) return;
+  await call({ op: 'account:changePassword', passcode: r.passcode ?? '', next: r.next ?? '', confirmation: r.confirmation ?? '' });
+  await loadConfig(); toast('密码已修改');
+});
+$('accountRecovery').onclick = action(async () => {
+  const r = await modal('设置密保问题', '忘记密码时可通过回答密保问题重置。请牢记答案。', [
+    { name: 'question', label: '密保问题', type: 'text' },
+    { name: 'answer', label: '密保答案', type: 'text' },
+  ]);
+  if (!r) return;
+  await call({ op: 'account:setRecovery', question: r.question ?? '', answer: r.answer ?? '' });
+  await loadConfig(); toast('密保问题已设置');
+});
+$('accountSet').onclick = action(async () => { showLock(false); });
 
 // ---------- Google OAuth (real, built-in client IDs) ----------
 const IS_DESKTOP = !!window.diary;
@@ -395,23 +762,20 @@ async function loginWithGoogle(): Promise<void> {
   await afterGoogle(info);
 }
 
-async function afterGoogle(info: { email?: string; name?: string }): Promise<void> {
-  if (info.email || info.name) await call({ op: 'profile:set', username: info.name || info.email || '' });
-  toast('已使用 Google 登录：' + (info.email || info.name || ''));
-  const cfg = await call<{ hasLocalAccount: boolean }>({ op: 'config:get' });
-  if (!cfg.hasLocalAccount) {
-    const r = await modal('创建本地密码', '为这台设备上的 Diary 数据设置访问密码（至少 8 位）。忘记将无法恢复。', [{ name: 'next', label: t('password') }, { name: 'confirmation', label: t('confirmPasscode') }]);
-    if (r) await call({ op: 'account:setLocal', passcode: r.next! });
-  }
-  hideLock(); await refresh();
-}
-
 // settings: sign in / sign out
-$('googleLogin').onclick = action(() => loginWithGoogle());
+$('googleLogin').onclick = action(async () => {
+  $('googleState').textContent = '已打开浏览器，请在浏览器中完成 Google 授权…';
+  try { await loginWithGoogle(); }
+  catch (error) {
+    const message = localizedError(error);
+    $('googleState').textContent = `Google 登录失败：${message}`;
+    throw error;
+  }
+});
 $('googleLogout').onclick = action(async () => {
-  if (!await modal(t('deleteEntry'), '退出 Google 登录会清除本机保存的登录态，需要时可重新登录。')) return;
-  await call({ op: 'account:clearOAuth', provider: 'google' });
-  await loadConfig(); toast(t('done'));
+  if (!await modal(t('deleteEntry'), '退出后当前账户将回到登录界面，本地资料保留，需要时可重新登录。')) return;
+  await call({ op: 'account:signOut' });
+  await refreshSnapshot(); await loadConfig(); toast('已退出登录');
 });
 // Android manual fallback when the deep link does not fire
 $('googleFinish').onclick = action(async () => {
@@ -440,18 +804,24 @@ async function fileToBase64(file: File): Promise<{ data: string; mime: string }>
   return { data: btoa(binary), mime: file.type || 'application/octet-stream' };
 }
 $('profileAvatar').onclick = action(async () => {
-  const file = await pickFile('image/*,video/*'); if (!file) return;
+  const file = await pickFile('image/*'); if (!file) return;
   const { data, mime } = await fileToBase64(file);
   const info = await call<{ id: string }>({ op: 'media:import', name: file.name, mime, data });
   await call({ op: 'profile:set', avatar: info.id });
-  const url = await call<string>({ op: 'media:data', id: info.id });
-  const img = $<HTMLImageElement>('profileAvatarPreview'); img.src = url; img.hidden = false;
-  const av = $<HTMLImageElement>('avatarImg'); av.src = url; av.hidden = false;
+  const url = await resolveAvatar(info.id);
+  const name = lastSnapshot?.currentUser?.displayName || lastSnapshot?.profile.username || '本地用户';
+  setAvatar($<HTMLImageElement>('avatarImg'), $('userAvatar'), url, name);
+  setAvatar($<HTMLImageElement>('profileAvatarPreview'), $('profileAvatarInitial'), url, name);
   toast(t('done'));
 });
 $('profileSave').onclick = action(async () => {
-  await call({ op: 'profile:set', username: $<HTMLInputElement>('profileUsername').value, signature: $<HTMLInputElement>('profileSignature').value });
-  toast(t('done'));
+  const nickname = $<HTMLInputElement>('profileUsername').value.trim();
+  await call({ op: 'profile:set', username: nickname, signature: $<HTMLTextAreaElement>('profileSignature').value });
+  // Keep the signed-in account's display name in sync with the nickname.
+  const uid = lastSnapshot?.currentUser?.id;
+  if (uid && nickname) await call({ op: 'account:renameDisplay', id: uid, displayName: nickname }).catch(() => undefined);
+  await refreshSnapshot(); await loadConfig();
+  toast('资料已保存');
 });
 
 // ---------- Media: background & BGM ----------
@@ -461,10 +831,257 @@ async function importMediaAs(accept: string): Promise<string | null> {
   const info = await call<{ id: string }>({ op: 'media:import', name: file.name, mime, data });
   return info.id;
 }
-$('bgImport').onclick = action(async () => { const id = await importMediaAs('image/*'); if (id) { await call({ op: 'media:setBackground', background: id }); await loadConfig(); toast(t('done')); } });
-$('bgClear').onclick = action(async () => { await call({ op: 'media:setBackground', background: null }); document.body.style.removeProperty('--diary-bg'); await loadConfig(); });
-$('bgmImport').onclick = action(async () => { const id = await importMediaAs('audio/*,video/*'); if (id) { await call({ op: 'media:setBgm', bgm: id }); await loadConfig(); toast(t('done')); } });
-$('bgmClear').onclick = action(async () => { await call({ op: 'media:setBgm', bgm: null }); $<HTMLAudioElement>('bgmPlayer').pause(); await loadConfig(); });
+// ---------- Wallpaper plugin: sources, library, appearance ----------
+type WallpaperEntry = {
+  id: string; title: string; type: string; dir: string; source: string;
+  media: string | null; preview: string | null; animated: boolean; note: string;
+};
+
+async function importBackground(kind: 'image' | 'video'): Promise<void> {
+  const accept = kind === 'video'
+    ? 'video/mp4,video/webm,video/quicktime,.mp4,.webm,.mov'
+    : 'image/png,image/jpeg,image/webp,image/gif,image/svg+xml,image/avif';
+  const file = await pickFile(accept);
+  if (!file) return;
+  const { data, mime } = await fileToBase64(file);
+  const info = await call<{ id: string }>({ op: 'media:import', name: file.name, mime, data });
+  await call({ op: 'background:set', kind, id: info.id });
+  await loadConfig();
+  toast(kind === 'video' ? '视频背景已应用' : '背景已应用');
+}
+$('bgPickImage').onclick = action(() => importBackground('image'));
+$('bgPickGif').onclick = action(() => importBackground('image'));
+$('bgPickVideo').onclick = action(() => importBackground('video'));
+$('bgClear').onclick = action(async () => {
+  await call({ op: 'background:clear' });
+  await loadConfig();
+  toast('已清除背景');
+});
+$('bgFit').onchange = action(async () => {
+  await call({ op: 'background:set', fit: ($('bgFit') as HTMLSelectElement).value });
+  await loadConfig();
+});
+
+/** Live preview while dragging; only the release persists. */
+function bindBackgroundSlider(id: 'bgDim' | 'bgBlur', labelId: string, unit: string): void {
+  const input = $<HTMLInputElement>(id);
+  input.oninput = () => {
+    const value = Number(input.value);
+    $(labelId).textContent = `${value}${unit}`;
+    if (id === 'bgDim') $('bgDimLayer').style.opacity = String(value / 100);
+    else document.documentElement.style.setProperty('--bg-blur', `${value}px`);
+  };
+  input.onchange = action(async () => {
+    await call(id === 'bgDim'
+      ? { op: 'background:set', dim: Number(input.value) / 100 }
+      : { op: 'background:set', blur: Number(input.value) });
+    await loadConfig();
+  });
+}
+bindBackgroundSlider('bgDim', 'bgDimValue', '%');
+bindBackgroundSlider('bgBlur', 'bgBlurValue', 'px');
+
+const WALLPAPER_KIND: Record<string, string> = { video: '视频', scene: '场景', web: '网页', application: '应用', text: '文字', other: '壁纸' };
+function renderWallpaperGrid(entries: WallpaperEntry[]): void {
+  const grid = $('bgLibraryGrid');
+  grid.replaceChildren();
+  if (!entries.length) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = '没有可用的壁纸项目。可以点「选择目录…」手动指定，或直接用上面的图片／动图／视频。';
+    grid.append(empty);
+    return;
+  }
+  for (const entry of entries) {
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'wallpaper-card';
+    card.title = entry.dir;
+    const thumb = document.createElement('span');
+    thumb.className = 'wallpaper-thumb';
+    const thumbPath = entry.preview ?? entry.media;
+    if (thumbPath) {
+      const url = schemeUrl('wallpaper', toToken(thumbPath));
+      if (VIDEO_FILE.test(thumbPath)) {
+        const clip = document.createElement('video');
+        clip.src = url; clip.muted = true; clip.loop = true; clip.autoplay = true; clip.playsInline = true;
+        thumb.append(clip);
+      } else thumb.style.backgroundImage = `url("${url}")`;
+    }
+    const name = document.createElement('b');
+    name.textContent = entry.title;
+    const meta = document.createElement('small');
+    meta.textContent = `${WALLPAPER_KIND[entry.type] ?? '壁纸'} · ${entry.animated ? '动效' : '静态'}`;
+    card.append(thumb, name, meta);
+    if (entry.note) { const note = document.createElement('em'); note.textContent = entry.note; card.append(note); }
+    card.onclick = action(async () => {
+      const source = entry.media ?? entry.preview;
+      if (!source) { toast('这个壁纸没有可直接播放的文件'); return; }
+      await call({ op: 'background:set', kind: 'wallpaper', path: source, title: entry.title, animated: entry.animated });
+      await loadConfig();
+      toast(`已应用壁纸：${entry.title}`);
+    });
+    grid.append(card);
+  }
+}
+
+async function loadWallpapers(): Promise<void> {
+  $('bgLibraryState').textContent = '扫描中…';
+  const scan = await call<{ engines: string[]; entries: WallpaperEntry[]; hint: string }>({ op: 'wallpaper:scan' });
+  renderWallpaperGrid(scan.entries);
+  $('bgLibraryState').textContent = `${scan.engines.length} 个目录 · ${scan.entries.length} 个壁纸`;
+  $('bgLibraryHint').textContent = scan.hint || (scan.engines.length ? `扫描目录：${scan.engines.join(' · ')}` : '');
+}
+$('bgOpenLibrary').onclick = action(async () => {
+  $('bgLibrary').hidden = false;
+  await loadWallpapers();
+});
+$('bgLibraryRescan').onclick = action(loadWallpapers);
+$('bgLibraryPick').onclick = action(async () => {
+  const result = await call<{ canceled: boolean; dir: string | null; engines: string[]; entries: WallpaperEntry[]; hint: string }>({ op: 'wallpaper:pick' });
+  $('bgLibrary').hidden = false;
+  if (result.canceled) return;
+  renderWallpaperGrid(result.entries);
+  $('bgLibraryState').textContent = `${result.engines.length} 个目录 · ${result.entries.length} 个壁纸`;
+  $('bgLibraryHint').textContent = result.hint || `扫描目录：${result.engines.join(' · ')}`;
+  toast(`已选择目录：${result.dir ?? ''}`);
+});
+
+$('bgmImport').onclick = action(async () => {
+  const id = await importMediaAs('audio/*,video/*');
+  if (!id) return;
+  await call({ op: 'media:setBgm', bgm: id });
+  await loadConfig();
+  toast(t('done'));
+});
+$('bgmClear').onclick = action(async () => {
+  await call({ op: 'media:setBgm', bgm: null });
+  $<HTMLAudioElement>('bgmPlayer').pause();
+  await loadConfig();
+});
+
+// ---------- Permissions & location ----------
+function renderPermissionState(cfg: Snapshot): void {
+  ($('permNetwork') as HTMLInputElement).checked = cfg.permissions.network;
+  ($('permLocation') as HTMLInputElement).checked = cfg.permissions.location;
+  ($('locMode') as HTMLSelectElement).value = cfg.location.mode;
+  $('locManual').hidden = cfg.location.mode !== 'manual';
+  ($('locLat') as HTMLInputElement).value = cfg.location.lat === null ? '' : String(cfg.location.lat);
+  ($('locLon') as HTMLInputElement).value = cfg.location.lon === null ? '' : String(cfg.location.lon);
+  ($('locLabel') as HTMLInputElement).value = cfg.location.label;
+  const where = cfg.location.label
+    || (cfg.location.lat !== null && cfg.location.lon !== null ? `${cfg.location.lat.toFixed(3)}, ${cfg.location.lon.toFixed(3)}` : '未设置');
+  $('locState').textContent = !cfg.permissions.network
+    ? '联网已关闭：天气、AI 问答与 AI 搜索都不会发起任何请求。'
+    : cfg.permissions.location ? `天气位置将使用：${where}` : '未开启定位：请手动填写经纬度后再打开天气。';
+}
+$('permNetwork').onchange = action(async () => {
+  const network = ($('permNetwork') as HTMLInputElement).checked;
+  await call({ op: 'permission:set', network });
+  await loadConfig();
+  repaintActiveView();
+  toast(network ? '已允许联网，天气会自动刷新' : '已关闭联网');
+});
+$('permLocation').onchange = action(async () => {
+  const location = ($('permLocation') as HTMLInputElement).checked;
+  await call({ op: 'permission:set', location });
+  await loadConfig();
+  repaintActiveView();
+  toast(location ? '已允许定位' : '已关闭定位');
+});
+$('locMode').onchange = action(async () => {
+  await call({ op: 'location:set', mode: ($('locMode') as HTMLSelectElement).value });
+  await loadConfig();
+  repaintActiveView();
+});
+$('locSave').onclick = action(async () => {
+  const lat = Number(($('locLat') as HTMLInputElement).value);
+  const lon = Number(($('locLon') as HTMLInputElement).value);
+  await call({
+    op: 'location:set', mode: 'manual', label: ($('locLabel') as HTMLInputElement).value.trim(),
+    ...(Number.isFinite(lat) ? { lat } : {}), ...(Number.isFinite(lon) ? { lon } : {}),
+  });
+  await loadConfig();
+  repaintActiveView();
+  toast('定位已保存');
+});
+
+// ---------- Plugin manager (sidebar, between 导入日记 and 设置) ----------
+function pluginRow(name: string, detail: string, badge: string, badgeClass: string, actionButton?: { label: string; run: () => void }): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'plugin-row';
+  const info = document.createElement('div');
+  info.className = 'plugin-info';
+  const title = document.createElement('b');
+  title.textContent = name;
+  const sub = document.createElement('small');
+  sub.textContent = detail;
+  info.append(title, sub);
+  const tag = document.createElement('span');
+  tag.className = `plugin-badge ${badgeClass}`;
+  tag.textContent = badge;
+  row.append(info, tag);
+  if (actionButton) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'plugin-toggle';
+    button.textContent = actionButton.label;
+    button.onclick = actionButton.run;
+    row.append(button);
+  }
+  return row;
+}
+
+async function openPluginManager(): Promise<void> {
+  const list = await call<PluginList>({ op: 'plugin:list' });
+  const builtinHost = $('builtinPluginList');
+  builtinHost.replaceChildren();
+  for (const plugin of list.builtin) {
+    builtinHost.append(pluginRow(
+      `${plugin.name}`,
+      `${plugin.description}　v${plugin.version}`,
+      plugin.enabled ? '已启用' : '已停用',
+      plugin.enabled ? 'on' : 'off',
+      {
+        label: plugin.enabled ? '停用' : '启用',
+        run: () => { void (async () => {
+          await call({ op: 'plugin:toggle', pluginId: plugin.id, enabled: !plugin.enabled });
+          toast(`${plugin.name}已${plugin.enabled ? '停用' : '启用'}`);
+          await loadConfig();
+          await openPluginManager();
+          repaintActiveView();
+        })(); },
+      },
+    ));
+  }
+  const externalHost = $('externalPluginList');
+  externalHost.replaceChildren();
+  if (!list.external.length && !list.errors.length) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = '还没有外部插件。把 .mjs 文件放进下面的插件目录，重启后它会出现在这里并可在设置 → AI 中选用。';
+    externalHost.append(empty);
+  }
+  for (const plugin of list.external) {
+    externalHost.append(pluginRow(
+      plugin.label,
+      `${plugin.custom ? '自带传输层（无需 API Key）' : `${plugin.baseUrl || '未填地址'} · ${plugin.model || '未指定模型'}`}　id: ${plugin.id}`,
+      '已加载', 'on',
+    ));
+  }
+  for (const problem of list.errors) {
+    externalHost.append(pluginRow(problem.file.split(/[\\/]/).pop() ?? problem.file, problem.message, '加载失败', 'bad'));
+  }
+  $('pluginDirHint').textContent = `插件目录：${list.directory}`;
+  $('pluginPanel').hidden = false;
+}
+$('pluginManage').onclick = action(openPluginManager);
+$('pluginClose').onclick = () => { $('pluginPanel').hidden = true; };
+$('pluginOpenDir').onclick = action(async () => { await call({ op: 'plugin:openDir' }); toast('已打开插件目录'); });
+$('pluginRescan').onclick = action(async () => {
+  const scan = await call<{ entries: unknown[] }>({ op: 'wallpaper:scan' });
+  toast(`已重新扫描壁纸库：${scan.entries.length} 个项目`);
+});
 
 // ---------- AI assistant ----------
 function togglePopover(popover: HTMLElement, button: HTMLElement) {
@@ -505,6 +1122,54 @@ $('webDate').onclick = action(async () => {
   $('webResult').textContent = `${info.label}（${info.iso}）`;
   insertText(`# ${info.iso} ${info.label}`);
 });
+// ---------- Diary mode: the imported weather system ----------
+let diaryWeather: WeatherOk | null = null;
+
+/** Renders the full metric table inside the diary popover. */
+function paintDiaryWeather(report: WeatherReport): void {
+  const out = $('webResult');
+  out.replaceChildren();
+  if (!report.ok) {
+    diaryWeather = null;
+    out.textContent = report.message;
+    return;
+  }
+  diaryWeather = report;
+  const grid = document.createElement('div');
+  grid.className = 'web-weather-grid';
+  for (const [label, value] of weatherMetrics(report.weather)) {
+    const cell = document.createElement('div');
+    const key = document.createElement('small');
+    key.textContent = label;
+    const val = document.createElement('b');
+    val.textContent = value;
+    cell.append(key, val);
+    grid.append(cell);
+  }
+  out.append(grid);
+  const meta = document.createElement('p');
+  meta.className = 'hint';
+  meta.textContent = `${report.place || '当前位置'}`
+    + (report.air ? ` · 空气 ${report.air.aqi ?? '—'} ${report.air.level}` : '')
+    + ' · 来源 Open-Meteo';
+  out.append(meta);
+}
+
+async function loadDiaryWeather(): Promise<boolean> {
+  const report = await call<WeatherReport>({ op: 'weather:now' });
+  paintDiaryWeather(report);
+  if (!report.ok) toast(report.message);
+  return report.ok;
+}
+
+$('webWeatherNow').onclick = action(loadDiaryWeather);
+$('webWeatherImport').onclick = action(async () => {
+  if (!diaryWeather && !await loadDiaryWeather()) return;
+  if (!diaryWeather) return;
+  insertText(weatherToMarkdown(diaryWeather));
+  $('webPopover').hidden = true;
+  toast('天气已写入日记正文');
+});
 $('webWeather').onclick = action(async () => {
   const lat = parseFloat($<HTMLInputElement>('webLat').value); const lon = parseFloat($<HTMLInputElement>('webLon').value);
   if (!Number.isFinite(lat) || !Number.isFinite(lon)) { toast(t('fetchLocation')); return; }
@@ -512,96 +1177,6 @@ $('webWeather').onclick = action(async () => {
   $('webResult').textContent = `${t('fetchWeather')}：${w.description}，${w.tempC}°C`;
   insertText(`天气：${w.description}，${w.tempC}°C`);
 });
-
-// ---------- Campus affairs mode ----------
-const emptyProfile = (): CampusProfile => ({ name: '', studentId: '', school: '', college: '', major: '', grade: '', phone: '', email: '' });
-function campusProfile(): CampusProfile {
-  try { return { ...emptyProfile(), ...JSON.parse(localStorage.getItem('diary.campus.profile') || '{}') as CampusProfile }; }
-  catch { return emptyProfile(); }
-}
-function campusCases(): CampusCase[] {
-  try { const value = JSON.parse(localStorage.getItem('diary.campus.cases') || '[]'); return Array.isArray(value) ? value as CampusCase[] : []; }
-  catch { return []; }
-}
-function saveCampusCases(items: CampusCase[]) { localStorage.setItem('diary.campus.cases', JSON.stringify(items)); }
-function textElement(tag: string, text: string, className = ''): HTMLElement {
-  const element = document.createElement(tag); element.textContent = text; element.className = className; return element;
-}
-function setMode(mode: 'diary' | 'campus') {
-  appMode = mode; localStorage.setItem('diary.mode', mode);
-  $('diaryMode').classList.toggle('active', mode === 'diary'); $('campusMode').classList.toggle('active', mode === 'campus');
-  $('diarySidebar').hidden = mode !== 'diary'; $('campusSidebar').hidden = mode !== 'campus'; $('campusWorkspace').hidden = mode !== 'campus';
-  if (mode === 'campus') { $('empty').hidden = true; $('workspace').hidden = true; $('breadcrumbDate').textContent = t('campusMode'); renderServices(campusServices); renderCaseList(); }
-  else { $('campusWorkspace').hidden = true; $('breadcrumbDate').textContent = locale.date(Date.now(), { month: 'long', day: 'numeric', weekday: 'long' }); if (current) $('workspace').hidden = false; else $('empty').hidden = false; }
-  document.body.classList.remove('sidebar-open');
-}
-function renderServices(services: CampusService[]) {
-  const grid = $('serviceGrid'); if (!grid) return; grid.replaceChildren();
-  for (const service of services) {
-    const button = document.createElement('button'); button.className = 'service-card';
-    button.append(textElement('span', service.icon, 'service-icon'), textElement('strong', service.title), textElement('p', service.description), textElement('small', `办理部门：${service.department}`));
-    button.onclick = () => renderServiceForm(service); grid.append(button);
-  }
-  $('campusAdvice').textContent = services.length ? t('campusAdvice') : '暂未识别到匹配事项，请换一种说法或从下方分类选择。';
-}
-function formInput(labelText: string, value = ''): HTMLLabelElement {
-  const label = document.createElement('label'); label.textContent = labelText;
-  const input = document.createElement(labelText.includes('原因') || labelText.includes('描述') || labelText.includes('理由') ? 'textarea' : 'input') as HTMLInputElement | HTMLTextAreaElement;
-  input.name = labelText; input.value = value; input.autocomplete = 'off'; label.append(input); return label;
-}
-function renderServiceForm(service: CampusService) {
-  activeCaseId = null; const detail = $('caseDetail'); detail.replaceChildren(); detail.hidden = false;
-  detail.append(textElement('h2', `${service.icon} ${service.title}`), textElement('p', `系统已判断办理部门：${service.department}`, 'case-meta'));
-  const form = document.createElement('div'); form.className = 'case-form';
-  for (const field of service.fields) form.append(formInput(field));
-  detail.append(textElement('h3', '申请信息（身份字段将自动填写）'), form, textElement('h3', '预计材料清单'));
-  const checklist = document.createElement('div'); checklist.className = 'check-list';
-  for (const name of service.materials) checklist.append(textElement('div', `□ ${name}`, 'check-row'));
-  detail.append(checklist, textElement('h3', '跨部门流程'));
-  const route = document.createElement('div'); route.className = 'route-list';
-  service.steps.forEach((step, index) => route.append(textElement('div', `${index + 1}. ${step}`, 'route-row'))); detail.append(route);
-  const actions = document.createElement('div'); actions.className = 'case-actions'; const create = textElement('button', '生成申请表并开始追踪', 'primary') as HTMLButtonElement;
-  create.onclick = () => {
-    const values = Object.fromEntries([...form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input,textarea')].map(input => [input.name, input.value.trim()]));
-    const item = createCampusCase(service, campusProfile(), values); const items = campusCases(); items.unshift(item); saveCampusCases(items); activeCaseId = item.id; renderCampusCase(item); renderCaseList(); toast('已生成申请表与办理清单');
-  };
-  actions.append(create); detail.append(actions); detail.scrollIntoView({ behavior: 'smooth', block: 'start' });
-}
-function renderCampusCase(item: CampusCase) {
-  const detail = $('caseDetail'); detail.replaceChildren(); detail.hidden = false;
-  detail.append(textElement('h2', item.title)); const meta = document.createElement('p'); meta.className = 'case-meta';
-  meta.append(textElement('span', ({ draft: '待提交', submitted: '已提交', processing: '办理中', completed: '已完成' } as const)[item.status], 'status-pill'), document.createTextNode(`　流转：${item.department}`)); detail.append(meta);
-  detail.append(textElement('h3', '自动填写的申请信息')); const form = document.createElement('div'); form.className = 'case-form';
-  for (const [key, value] of Object.entries(item.fields)) form.append(formInput(key, value)); detail.append(form);
-  detail.append(textElement('h3', '材料清单')); const checks = document.createElement('div'); checks.className = 'check-list';
-  item.materials.forEach((material, index) => { const label = document.createElement('label'); label.className = 'check-row'; const input = document.createElement('input'); input.type = 'checkbox'; input.checked = material.checked; input.onchange = () => updateCampusCase(item.id, value => { value.materials[index]!.checked = input.checked; return value; }); label.append(input, document.createTextNode(material.name)); checks.append(label); }); detail.append(checks);
-  detail.append(textElement('h3', '部门流转与结果追踪')); const route = document.createElement('div'); route.className = 'route-list';
-  item.steps.forEach(step => { const row = document.createElement('div'); row.className = `route-row${step.done ? ' done' : ''}`; row.append(textElement('span', step.done ? '✓' : '', 'route-dot')); const words = document.createElement('div'); words.append(textElement('strong', step.label), textElement('small', step.department)); row.append(words); route.append(row); }); detail.append(route);
-  const actions = document.createElement('div'); actions.className = 'case-actions';
-  const save = textElement('button', '保存表单', 'text-button') as HTMLButtonElement; save.onclick = () => { const fields = Object.fromEntries([...form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input,textarea')].map(input => [input.name, input.value])); updateCampusCase(item.id, value => ({ ...value, fields })); toast('申请表已保存'); };
-  const copy = textElement('button', '复制申请表', 'text-button') as HTMLButtonElement; copy.onclick = action(async () => { await navigator.clipboard.writeText(applicationText(campusCases().find(value => value.id === item.id) || item)); toast('申请表已复制'); });
-  const next = textElement('button', item.status === 'draft' ? '提交并开始办理' : item.status === 'completed' ? '已办结' : '推进下一环节', 'primary') as HTMLButtonElement; next.disabled = item.status === 'completed'; next.onclick = () => updateCampusCase(item.id, advanceCampusCase, true);
-  actions.append(save, copy, next); detail.append(actions); detail.scrollIntoView({ behavior: 'smooth', block: 'start' });
-}
-function updateCampusCase(id: string, update: (item: CampusCase) => CampusCase, rerender = false) {
-  const items = campusCases(); const index = items.findIndex(item => item.id === id); if (index < 0) return; items[index] = update(structuredClone(items[index]!)); saveCampusCases(items); renderCaseList(); if (rerender) renderCampusCase(items[index]!);
-}
-function renderCaseList() {
-  const list = $('caseList'); if (!list) return; list.replaceChildren(); const query = $<HTMLInputElement>('campusSearch')?.value.trim().toLocaleLowerCase() || '';
-  const items = campusCases().filter(item => `${item.title} ${item.department}`.toLocaleLowerCase().includes(query)); $('caseCount').textContent = String(campusCases().length);
-  for (const item of items) { const button = document.createElement('button'); button.className = `case-card${activeCaseId === item.id ? ' active' : ''}`; button.append(textElement('strong', item.title), textElement('small', `${item.department} · ${{ draft: '待提交', submitted: '已提交', processing: '办理中', completed: '已完成' }[item.status]}`)); button.onclick = () => { activeCaseId = item.id; renderCampusCase(item); renderCaseList(); document.body.classList.remove('sidebar-open'); }; list.append(button); }
-  if (!items.length) list.append(textElement('p', '暂无办事记录', 'no-entries'));
-}
-$('diaryMode').onclick = () => setMode('diary'); $('campusMode').onclick = () => setMode('campus');
-$('campusNew').onclick = () => { activeCaseId = null; $('caseDetail').hidden = true; renderServices(campusServices); };
-$('campusSearch').oninput = renderCaseList;
-$('campusMatch').onclick = () => renderServices(matchCampusService($<HTMLInputElement>('campusQuestion').value));
-$('campusQuestion').onkeydown = event => { if (event.key === 'Enter') $('campusMatch').click(); };
-$('campusProfile').onclick = action(async () => { await loadConfig(); $('settingsPanel').hidden = false; (document.querySelector<HTMLButtonElement>('.settings-tabs button[data-tab="campus"]'))?.click(); });
-$('studentSave').onclick = () => {
-  const profile: CampusProfile = { name: $<HTMLInputElement>('studentName').value.trim(), studentId: $<HTMLInputElement>('studentId').value.trim(), school: $<HTMLInputElement>('studentSchool').value.trim(), college: $<HTMLInputElement>('studentCollege').value.trim(), major: $<HTMLInputElement>('studentMajor').value.trim(), grade: $<HTMLInputElement>('studentGrade').value.trim(), phone: $<HTMLInputElement>('studentPhone').value.trim(), email: $<HTMLInputElement>('studentEmail').value.trim() };
-  localStorage.setItem('diary.campus.profile', JSON.stringify(profile)); toast('学生身份已保存到本机');
-};
 
 // ---------- Batch operations ----------
 $('batchEncrypt').onclick = action(async () => {
@@ -696,63 +1271,49 @@ window.addEventListener('diary-back', () => {
 });
 
 // ---------- Unified one-stop navigation ----------
-type PortalView = 'home' | 'chat' | 'search-view' | 'competition' | 'guide' | 'diary';
-const viewTitles: Record<PortalView, string> = { home: '首页', chat: 'AI 问答', 'search-view': 'AI 搜索', competition: '竞赛中心', guide: '办事指南', diary: '日记' };
-let activeView: PortalView = 'home';
-function activateView(viewName: PortalView) {
+const viewTitles: Record<PortalViewName, string> = { home: '首页', chat: 'AI 问答', 'search-view': 'AI 搜索', competition: '竞赛中心', guide: '办事指南', diary: '日记' };
+let activeView: PortalViewName | null = null;
+function activateView(viewName: PortalViewName) {
   if (activeView === viewName) return;
   activeView = viewName;
-  const ids: Record<PortalView, string> = { home: 'homeView', chat: 'chatView', 'search-view': 'searchView', competition: 'competitionView', guide: 'guideView', diary: 'diaryView' };
-  for (const [name, id] of Object.entries(ids) as [PortalView, string][]) {
+  const ids: Record<PortalViewName, string> = { home: 'homeView', chat: 'chatView', 'search-view': 'searchView', competition: 'competitionView', guide: 'guideView', diary: 'diaryView' };
+  for (const [name, id] of Object.entries(ids) as [PortalViewName, string][]) {
     const panel = $(id); panel.hidden = name !== viewName; panel.classList.toggle('active-view', name === viewName);
   }
   document.querySelectorAll<HTMLButtonElement>('#primaryNav [data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === viewName));
   $('diarySidebar').hidden = viewName !== 'diary';
   $('breadcrumbDate').textContent = viewTitles[viewName];
   document.body.classList.remove('sidebar-open');
+  // Every portal screen renders itself from in-memory data, so opening a view
+  // never waits on a probe or a network round-trip.
+  mountPortal(viewName);
 }
+// Portal screens move the router through this hook (prompt chips -> chat).
+setPortalNavigator(activateView);
 document.addEventListener('click', event => {
   const target = (event.target as HTMLElement).closest<HTMLElement>('[data-view]');
-  const name = target?.dataset.view as PortalView | undefined;
+  const name = target?.dataset.view as PortalViewName | undefined;
   if (name && name in viewTitles) activateView(name);
-});
-
-const competitions = [
-  ['中国大学生计算机设计大赛', '学科竞赛 · 编程 / AI / 设计', '主办方信息待接入'],
-  ['全国大学生创新创业训练计划', '创新创业 · 团队项目', '教育主管部门信息待接入'],
-  ['蓝桥杯全国软件和信息技术专业人才大赛', '程序设计 · 个人参赛', '竞赛官网信息待接入'],
-];
-function renderCompetitions(filter = '') {
-  const query = filter.trim().toLocaleLowerCase(); $('competitionList').replaceChildren();
-  for (const item of competitions.filter(value => value.join(' ').toLocaleLowerCase().includes(query))) {
-    const card = document.createElement('article'); card.className = 'competition-card';
-    const heading = document.createElement('h3'); heading.textContent = item[0]!;
-    const badge = document.createElement('span'); badge.textContent = '演示';
-    const detail = document.createElement('p'); detail.textContent = `${item[1]} · ${item[2]}`;
-    card.append(heading, badge, detail); $('competitionList').append(card);
-  }
-}
-renderCompetitions();
-$<HTMLInputElement>('competitionSearch').oninput = event => renderCompetitions((event.currentTarget as HTMLInputElement).value);
-$('campusSend').onclick = action(async () => {
-  const input = $<HTMLTextAreaElement>('campusPrompt'); const prompt = input.value.trim(); if (!prompt) return;
-  const conversation = $('campusConversation');
-  const user = document.createElement('div'); user.className = 'message user'; const userBubble = document.createElement('div'); userBubble.className = 'bubble'; userBubble.textContent = prompt; user.append(userBubble); conversation.append(user); input.value = '';
-  const answer = await call<string>({ op: 'agent:compose', messages: [{ role: 'user', content: prompt }], task: 'compose' });
-  const assistant = document.createElement('div'); assistant.className = 'message assistant'; const avatar = document.createElement('span'); avatar.className = 'message-avatar'; avatar.textContent = '✦'; const bubble = document.createElement('div'); bubble.className = 'bubble'; bubble.textContent = answer; assistant.append(avatar, bubble); conversation.append(assistant);
-});
-$('portalSearchButton').onclick = action(async () => {
-  const query = $<HTMLInputElement>('portalSearchInput').value.trim(); if (!query) return;
-  const result = await call<string>({ op: 'agent:compose', messages: [{ role: 'user', content: `请联网检索并核验以下问题，明确标注来源：${query}` }], task: 'compose' });
-  $('portalSearchResult').replaceChildren(); const heading = document.createElement('h2'); heading.textContent = query; const body = document.createElement('p'); body.textContent = result; $('portalSearchResult').append(heading, body);
 });
 
 document.body.classList.toggle('dark', localStorage.getItem('diary.dark') === 'true');
 translate();
-activeView = 'guide'; activateView('home');
-// Boot: load config (lock screen if a local account exists), then refresh.
+activateView('home');
+// Boot: no account yet -> pick a sign-in method; otherwise honour "remember me".
 void action(async () => {
-  const cfg = await call<{ hasLocalAccount: boolean }>({ op: 'config:get' });
-  showLock(!cfg.hasLocalAccount);
+  const cfg = await call<Snapshot>({ op: 'config:get' });
+  lastSnapshot = cfg;
+  if (!cfg.users.length) {
+    showLock(true);
+  } else if (cfg.remember && cfg.currentUser) {
+    // Remembered account: skip the password prompt and go straight in.
+    unlocked = true; $('lockScreen').hidden = true;
+    await loadConfig(); await refresh();
+    toast(`欢迎回来，${cfg.currentUser.displayName}`);
+    return;
+  } else {
+    showLock(false);
+  }
+  await loadConfig();
   await refresh();
 })();

@@ -29,30 +29,194 @@ async function unseal(sealed: string, key: CryptoKey): Promise<string> {
 }
 
 export interface ProviderConfig { baseUrl: string; model: string; apiKeySealed?: string }
-export interface LocalAccount { salt: string; hash: string }
+
+/**
+ * One local account = one independent identity. Every user owns a private
+ * username, password (salted PBKDF2), profile and optional Google binding, so
+ * several people can share a device without seeing each other's space.
+ */
+export interface UserAccount {
+  id: string;
+  /** User-chosen login name, unique and case-insensitive across the device. */
+  username: string;
+  displayName: string;
+  /** data: URL so the avatar renders offline and under a strict CSP. */
+  avatar: string | null;
+  salt: string;
+  hash: string;
+  /** Google subject id, present only after this account is linked to Google. */
+  googleId: string | null;
+  googleEmail: string | null;
+  /** Security question + answer hash, used to recover a forgotten password. */
+  recoveryQuestion: string | null;
+  recoverySalt: string | null;
+  recoveryHash: string | null;
+  createdAt: number;
+  lastLoginAt: number | null;
+  /** Remember this account and sign in automatically on the next launch. */
+  autoLogin: boolean;
+}
+
+/** Google identity is kept apart from the access token on purpose. */
+export interface GoogleIdentity {
+  googleId: string;
+  email: string;
+  name: string;
+  picture: string | null;
+}
+
+export interface StoredToken { accessToken: string; linkedUserId: string | null }
+export interface Session { userId: string | null; remember: boolean }
+
+export type BackgroundKind = 'image' | 'video' | 'wallpaper';
+export interface WallpaperRef { path: string; title: string; animated: boolean }
+export interface BackgroundState {
+  /** How the background is produced. `null` means "no background". */
+  kind: BackgroundKind | null;
+  /** Media id of an imported picture or clip (lives in <vault>/media). */
+  media: string | null;
+  /** Wallpaper Engine project, used when kind === 'wallpaper'. */
+  wallpaper: WallpaperRef | null;
+  fit: 'cover' | 'contain' | 'tile' | 'center';
+  /** Black overlay opacity 0…1, so text stays readable over busy wallpapers. */
+  dim: number;
+  /** Backdrop blur in px. */
+  blur: number;
+}
+export interface PermissionState {
+  /** Master switch for every outbound request the app makes. */
+  network: boolean;
+  /** Allows reading the device position for the weather panel. */
+  location: boolean;
+}
+export interface LocationState {
+  /** `auto` resolves a rough position from the network; `manual` uses lat/lon. */
+  mode: 'auto' | 'manual';
+  lat: number | null;
+  lon: number | null;
+  label: string;
+}
+
 export interface PersistedConfig {
   version: number;
   activeProvider: string;
   providers: Record<string, ProviderConfig>;
-  account: { local: LocalAccount | null; oauth: Record<string, string>; oauthClients: Record<string, string> };
+  account: {
+    users: UserAccount[];
+    session: Session;
+    google: GoogleIdentity | null;
+    tokens: Record<string, StoredToken>;
+    oauthClients: Record<string, string>;
+  };
   profile: { username: string; avatar: string | null; signature: string };
-  media: { background: string | null; bgm: string | null };
+  media: { background: BackgroundState; bgm: string | null };
+  /** Built-in feature switches, e.g. { wallpaper: false } disables the plugin. */
+  plugins: { disabled: string[] };
+  permissions: PermissionState;
+  location: LocationState;
+  /** Optional extra folder scanned for Wallpaper Engine projects. */
+  wallpaperDir: string | null;
 }
 
+// Built-in OpenAI-compatible endpoints. DeepSeek leads because it is reachable
+// from mainland China without a proxy; `local` targets any OpenAI-compatible
+// server on this machine (openclaw gateway, Ollama, LM Studio, vLLM …).
 const DEFAULT_PROVIDERS: Record<string, ProviderConfig> = {
-  openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
   deepseek: { baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
+  openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
+  moonshot: { baseUrl: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k' },
+  zhipu: { baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash' },
+  siliconflow: { baseUrl: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct' },
+  local: { baseUrl: 'http://127.0.0.1:3000/v1', model: 'deepseek-v4-flash' },
+};
+
+export const EMPTY_BACKGROUND: BackgroundState = {
+  kind: null, media: null, wallpaper: null, fit: 'cover', dim: 0, blur: 0,
 };
 
 function defaultConfig(): PersistedConfig {
   return {
     version: 1,
-    activeProvider: 'openai',
+    activeProvider: 'deepseek',
     providers: structuredClone(DEFAULT_PROVIDERS),
-    account: { local: null, oauth: {}, oauthClients: {} },
+    account: { users: [], session: { userId: null, remember: false }, google: null, tokens: {}, oauthClients: {} },
     profile: { username: '', avatar: null, signature: '' },
-    media: { background: null, bgm: null },
+    media: { background: structuredClone(EMPTY_BACKGROUND), bgm: null },
+    plugins: { disabled: [] },
+    // Offline-first: nothing leaves the machine until the user opts in.
+    permissions: { network: false, location: false },
+    location: { mode: 'auto', lat: null, lon: null, label: '' },
+    wallpaperDir: null,
   };
+}
+
+/** Folds the pre-plugin `background: <media id>` shape into the new model. */
+function normalizeMedia(raw: unknown): { background: BackgroundState; bgm: string | null } {
+  const media = (raw ?? {}) as { background?: unknown; bgm?: unknown };
+  const bgm = typeof media.bgm === 'string' ? media.bgm : null;
+  const flat = media.background;
+  if (typeof flat === 'string') return { background: { ...structuredClone(EMPTY_BACKGROUND), kind: 'image', media: flat }, bgm };
+  if (flat && typeof flat === 'object') {
+    return { background: { ...structuredClone(EMPTY_BACKGROUND), ...(flat as Partial<BackgroundState>) }, bgm };
+  }
+  return { background: structuredClone(EMPTY_BACKGROUND), bgm };
+}
+
+/**
+ * Upgrade configs written by earlier builds. The old format kept a single
+ * `account.local` passcode plus an `account.oauth` map that mixed Google
+ * identity and access token together; both are folded into the new model so
+ * existing users keep their diary and their Google sign-in.
+ */
+function migrate(raw: Partial<PersistedConfig> & { account?: Record<string, unknown> }): PersistedConfig {
+  const base = defaultConfig();
+  const legacyAccount = (raw.account ?? {}) as {
+    local?: { salt: string; hash: string } | null;
+    oauth?: Record<string, string>;
+    oauthClients?: Record<string, string>;
+  };
+  // A build from the new model already carries a users array; keep it as-is.
+  if (Array.isArray((raw.account as { users?: unknown } | undefined)?.users)) {
+    return reconcile(raw);
+  }
+  const users: UserAccount[] = [];
+  const legacyLocal = legacyAccount.local;
+  if (legacyLocal && typeof legacyLocal.hash === 'string') {
+    users.push({
+      id: 'local', username: 'local', displayName: '本地用户', avatar: null,
+      salt: legacyLocal.salt, hash: legacyLocal.hash,
+      googleId: null, googleEmail: null,
+      recoveryQuestion: null, recoverySalt: null, recoveryHash: null,
+      createdAt: 0, lastLoginAt: null, autoLogin: false,
+    });
+  }
+  return reconcile({
+    ...raw,
+    account: {
+      users,
+      session: { userId: null, remember: false },
+      google: null,
+      // Legacy oauth values were access tokens; keep them addressable by provider.
+      tokens: Object.fromEntries(Object.entries(legacyAccount.oauth ?? {}).map(([k, v]) => [k, { accessToken: v, linkedUserId: null }])),
+      oauthClients: legacyAccount.oauthClients ?? {},
+    },
+  });
+}
+
+/** Adds every field introduced after version 1 without dropping existing data. */
+function reconcile(raw: Partial<PersistedConfig>): PersistedConfig {
+  const base = defaultConfig();
+  return {
+    ...base,
+    ...raw,
+    providers: { ...DEFAULT_PROVIDERS, ...(raw.providers ?? {}) },
+    profile: { ...base.profile, ...(raw.profile ?? {}) },
+    media: normalizeMedia(raw.media),
+    plugins: { disabled: Array.isArray(raw.plugins?.disabled) ? raw.plugins.disabled.filter(item => typeof item === 'string') : [] },
+    permissions: { ...base.permissions, ...(raw.permissions ?? {}) },
+    location: { ...base.location, ...(raw.location ?? {}) },
+    wallpaperDir: typeof raw.wallpaperDir === 'string' && raw.wallpaperDir ? raw.wallpaperDir : null,
+  } as PersistedConfig;
 }
 
 /**
@@ -79,8 +243,7 @@ export class HostConfig {
     let data: PersistedConfig = defaultConfig();
     try {
       const raw = await readFile(join(root, 'config.json'), 'utf8');
-      const parsed = JSON.parse(raw) as Partial<PersistedConfig>;
-      data = { ...defaultConfig(), ...parsed, providers: { ...DEFAULT_PROVIDERS, ...(parsed.providers ?? {}) } };
+      data = migrate(JSON.parse(raw) as Partial<PersistedConfig>);
     } catch { /* fresh config */ }
     const config = new HostConfig(root, data);
     config.#deviceKey = deviceKey;
@@ -115,13 +278,63 @@ export class HostConfig {
   get profile(): Readonly<PersistedConfig['profile']> { return this.#data.profile; }
   setMedia(patch: Partial<PersistedConfig['media']>): void { this.#data.media = { ...this.#data.media, ...patch }; }
   get media(): Readonly<PersistedConfig['media']> { return this.#data.media; }
-  setLocalAccount(account: LocalAccount | null): void { this.#data.account.local = account; }
-  get localAccount(): LocalAccount | null { return this.#data.account.local; }
-  setOAuth(provider: string, token: string | null): void {
-    if (token === null) delete this.#data.account.oauth[provider];
-    else this.#data.account.oauth[provider] = token;
+
+  // ---- Background / wallpaper ----
+  setBackground(patch: Partial<BackgroundState>): void {
+    this.#data.media = { ...this.#data.media, background: { ...this.#data.media.background, ...patch } };
   }
-  getOAuth(provider: string): string | null { return this.#data.account.oauth[provider] ?? null; }
+  clearBackground(): void { this.#data.media = { ...this.#data.media, background: structuredClone(EMPTY_BACKGROUND) }; }
+  get background(): Readonly<BackgroundState> { return this.#data.media.background; }
+  get wallpaperDir(): string | null { return this.#data.wallpaperDir; }
+  setWallpaperDir(dir: string | null): void { this.#data.wallpaperDir = dir; }
+
+  // ---- Permissions & location ----
+  get permissions(): Readonly<PermissionState> { return this.#data.permissions; }
+  setPermissions(patch: Partial<PermissionState>): void { this.#data.permissions = { ...this.#data.permissions, ...patch }; }
+  get location(): Readonly<LocationState> { return this.#data.location; }
+  setLocation(patch: Partial<LocationState>): void { this.#data.location = { ...this.#data.location, ...patch }; }
+
+  // ---- Built-in feature plugins ----
+  get disabledPlugins(): readonly string[] { return this.#data.plugins.disabled; }
+  isPluginEnabled(id: string): boolean { return !this.#data.plugins.disabled.includes(id); }
+  setPluginEnabled(id: string, enabled: boolean): void {
+    const set = new Set(this.#data.plugins.disabled);
+    if (enabled) set.delete(id); else set.add(id);
+    this.#data.plugins.disabled = [...set];
+  }
+
+  // ---- Multi-user accounts ----
+  get users(): readonly UserAccount[] { return this.#data.account.users; }
+  getUser(id: string): UserAccount | null { return this.#data.account.users.find(u => u.id === id) ?? null; }
+  /** Usernames are unique and case-insensitive, like a QQ/WeChat id. */
+  findUserByName(username: string): UserAccount | null {
+    const key = username.trim().toLowerCase();
+    return this.#data.account.users.find(u => u.username.toLowerCase() === key) ?? null;
+  }
+  findUserByGoogleId(googleId: string): UserAccount | null {
+    return this.#data.account.users.find(u => u.googleId === googleId) ?? null;
+  }
+  addUser(user: UserAccount): void { this.#data.account.users.push(user); }
+  updateUser(id: string, patch: Partial<UserAccount>): void {
+    const index = this.#data.account.users.findIndex(u => u.id === id);
+    if (index < 0) throw new Error(`Unknown user: ${id}`);
+    this.#data.account.users[index] = { ...this.#data.account.users[index]!, ...patch };
+  }
+  removeUser(id: string): void { this.#data.account.users = this.#data.account.users.filter(u => u.id !== id); }
+  get hasAnyUser(): boolean { return this.#data.account.users.length > 0; }
+
+  // ---- Session (remember / auto sign-in) ----
+  get session(): Readonly<Session> { return this.#data.account.session; }
+  setSession(patch: Partial<Session>): void { this.#data.account.session = { ...this.#data.account.session, ...patch }; }
+
+  // ---- Google identity (separate from the access token) ----
+  get google(): GoogleIdentity | null { return this.#data.account.google; }
+  setGoogle(identity: GoogleIdentity | null): void { this.#data.account.google = identity; }
+  getToken(provider: string): StoredToken | null { return this.#data.account.tokens[provider] ?? null; }
+  setToken(provider: string, token: StoredToken | null): void {
+    if (token === null) delete this.#data.account.tokens[provider];
+    else this.#data.account.tokens[provider] = token;
+  }
   setOAuthClient(provider: string, clientId: string): void { this.#data.account.oauthClients[provider] = clientId; }
   getOAuthClient(provider: string): string | null { return this.#data.account.oauthClients[provider] ?? null; }
 }

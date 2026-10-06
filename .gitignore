@@ -10,3 +10,6 @@ work/
 releases/
 *.log
 *.idsig
+filelist.txt
+push_src.py
+Diary.lnk.bak*
