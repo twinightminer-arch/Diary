@@ -8,11 +8,15 @@ import { createServer } from 'node:http';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { MarkdownEngine } from '../storage/markdown-engine.ts';
 import type { Request } from '../app/api.ts';
-import { HostConfig, type BackgroundState, type LocationState, type PermissionState } from '../host/config.ts';
-import { loadPlugins, type ProviderPlugin } from '../host/plugins.ts';
+import { HostConfig, DEFAULT_PROVIDER_IDS, type BackgroundState, type LocationState, type PermissionState } from '../host/config.ts';
+import { loadPlugins, providerNeedsKey, type ProviderPlugin } from '../host/plugins.ts';
 import { buildAgent } from '../agent/skills.ts';
 import { batchEncrypt, batchDecrypt, batchChangePasscode } from '../host/batch.ts';
-import { importMedia, listMedia, readMediaDataUrl, removeMedia } from '../host/media.ts';
+import {
+  importMedia, listMedia, readMediaDataUrl, removeMedia,
+  listBucket, copyIntoBucket, removeFromBucket, bucketDir, bucketFilePath,
+  type MediaBucket,
+} from '../host/media.ts';
 import { WALLPAPER_SCHEME, decodeWallpaperPath, scanWallpapers, type WallpaperScan } from '../host/wallpaper.ts';
 import {
   createLocalAccount, signIn, signOut, changeUserPassword, setRecoveryQuestion,
@@ -47,6 +51,23 @@ const BUILTIN_PLUGINS = [
   { id: 'competition', name: '竞赛中心', description: '竞赛目录、方向筛选与日历标记。', version: '1.0.0' },
 ] as const;
 
+/** Human names for the built-in OpenAI-compatible endpoints. */
+const PROVIDER_LABELS: Record<string, string> = {
+  deepseek: 'DeepSeek',
+  openai: 'OpenAI',
+  moonshot: 'Moonshot（月之暗面）',
+  zhipu: '智谱 GLM',
+  siliconflow: '硅基流动 SiliconFlow',
+  local: '本机自建网关',
+};
+
+/** Where to fall back when the active backend is switched off. */
+function fallbackProviderId(config: HostConfig, sources: readonly { id: string; enabled: boolean }[]): string {
+  const off = new Set(sources.filter(source => !source.enabled).map(source => source.id));
+  const usable = Object.keys(config.raw.providers).filter(id => !off.has(id));
+  return usable.includes('deepseek') ? 'deepseek' : usable[0] ?? 'deepseek';
+}
+
 /** Append one diagnostic line for the Google OAuth flow; never breaks the flow. */
 function oauthLog(step: string, detail = ''): void {
   try { appendFileSync(join(app.getPath('userData'), 'oauth-debug.log'), `${new Date().toISOString()} ${step} ${detail}\n`); } catch { /* diagnostics only */ }
@@ -56,13 +77,30 @@ function aiLog(step: string, detail = ''): void {
   try { appendFileSync(join(app.getPath('userData'), 'ai-debug.log'), `${new Date().toISOString()} ${step} ${detail}\n`); } catch { /* diagnostics only */ }
 }
 
-/** Makes backends declared by plugin files addressable in the settings screen. */
-async function registerPluginProviders(config: HostConfig, plugins: readonly ProviderPlugin[]): Promise<void> {
+/**
+ * Makes backends declared by plugin files addressable in the settings screen —
+ * and keeps them honest.
+ *
+ * The settings screen used to write one backend's endpoint into another's entry:
+ * switching the dropdown repainted which fields were visible but never refilled
+ * the inputs, so pressing save persisted the *previous* backend's values under
+ * the newly selected id. That is how a WorkBuddy entry ended up advertising
+ * `gpt-4o-mini`. A plugin owns its own endpoint and its own model list, so
+ * anything that disagrees with what the plugin declares is rewritten here on
+ * every start — which also repairs configs already damaged by that bug.
+ */
+async function syncPluginProviders(config: HostConfig, plugins: readonly ProviderPlugin[]): Promise<void> {
   let changed = false;
   for (const plugin of plugins) {
-    if (config.raw.providers[plugin.id]) continue;
-    config.setProvider(plugin.id, { baseUrl: plugin.baseUrl ?? '', model: plugin.model ?? '' });
-    aiLog('plugin-registered', `${plugin.id} -> ${plugin.baseUrl ?? ''}`);
+    const current = config.raw.providers[plugin.id];
+    const catalogue = plugin.models?.length ? plugin.models : plugin.model ? [plugin.model] : [];
+    const declared = plugin.model ?? '';
+    // Keep a model the plugin still serves; otherwise fall back to its default.
+    const model = current?.model && (!catalogue.length || catalogue.includes(current.model)) ? current.model : declared;
+    const baseUrl = plugin.baseUrl ?? '';
+    if (current && current.model === model && current.baseUrl === baseUrl) continue;
+    config.setProvider(plugin.id, { baseUrl, model });
+    aiLog('plugin-synced', `${plugin.id} -> baseUrl="${baseUrl}" model="${model}" (was "${current?.model ?? ''}")`);
     changed = true;
   }
   if (changed) await config.save();
@@ -109,21 +147,31 @@ else {
     const engine = await MarkdownEngine.open(vault);
     const config = await HostConfig.open(dataDir);
     // AI plugins: every .mjs dropped into <userData>/plugins/ becomes a
-    // selectable backend (see src/host/plugins.ts for the contract).
-    const plugins = await loadPlugins(join(dataDir, 'plugins'));
+    // selectable backend (see src/host/plugins.ts for the contract). Each one
+    // carries its own on/off switch, so only the enabled ones reach the agent.
+    const plugins = await loadPlugins(join(dataDir, 'plugins'), id => config.isAiPluginEnabled(id));
     for (const problem of plugins.errors) aiLog('plugin-error', `${problem.file} ${problem.message}`);
-    await registerPluginProviders(config, plugins.providers);
+    await syncPluginProviders(config, plugins.providers);
     await autoWireProvider(config);
     // Electron's net.fetch runs on the Chromium network stack and honours the OS
     // proxy; Node's global fetch ignores it and then hangs forever behind Clash.
     const aiFetch = net.fetch.bind(net) as unknown as typeof fetch;
-    const agent = buildAgent({ vault, config, fetchImpl: aiFetch, plugins: plugins.providers });
+    const enabledProviders = () => plugins.providers.filter(plugin => config.isAiPluginEnabled(plugin.id));
+    // The agent captures its plugin list, so flipping a switch has to rebuild it.
+    let agent = buildAgent({ vault, config, fetchImpl: aiFetch, plugins: enabledProviders() });
+    const rebuildAgent = () => { agent = buildAgent({ vault, config, fetchImpl: aiFetch, plugins: enabledProviders() }); };
     aiLog('ready', `provider=${config.activeProvider} plugins=${plugins.sources.length}`);
 
     // ---- Media protocol + Wallpaper Engine library ----
     // Imported media and wallpaper projects live outside the bundle, and the
     // renderer CSP forbids file://, so everything is served over this scheme.
     mediaRoots.add(resolve(join(vault, 'media')));
+    // Backgrounds and music live in their own folders (see host/media.ts).
+    for (const bucket of ['backgrounds', 'music'] as const) {
+      const dir = bucketDir(vault, bucket);
+      try { await mkdir(dir, { recursive: true, mode: 0o700 }); } catch { /* created on first import */ }
+      mediaRoots.add(resolve(dir));
+    }
     let wallpaperCache: WallpaperScan = { engines: [], entries: [], hint: '' };
     const refreshWallpapers = async (force = false): Promise<WallpaperScan> => {
       if (!force && (wallpaperCache.entries.length || wallpaperCache.hint)) return wallpaperCache;
@@ -137,8 +185,12 @@ else {
       aiLog('wallpaper-scan', `engines=${wallpaperCache.engines.length} entries=${wallpaperCache.entries.length}`);
       return wallpaperCache;
     };
-    await refreshWallpapers(true);
 
+    // The scheme must be live before the window paints its first frame: the
+    // renderer asks for the saved background the moment it boots. Scanning
+    // Wallpaper Engine can take seconds, and while this handler was registered
+    // *after* that scan the very first background request failed — which is
+    // exactly why a wallpaper only showed up after re-opening the app.
     protocol.handle(WALLPAPER_SCHEME, async (request) => {
       try {
         const url = new URL(request.url);
@@ -149,7 +201,9 @@ else {
         else if (kind === 'media') {
           if (!/^[A-Za-z0-9_-]{1,64}\.[A-Za-z0-9]{1,8}$/.test(rest)) return new Response('bad media id', { status: 400 });
           file = join(vault, 'media', rest);
-        } else return new Response('unknown host', { status: 400 });
+        } else if (kind === 'bg') file = bucketFilePath(vault, 'backgrounds', rest);
+        else if (kind === 'music') file = bucketFilePath(vault, 'music', rest);
+        else return new Response('unknown host', { status: 400 });
         const target = resolve(file);
         const allowed = [...mediaRoots].some(root => target.toLowerCase().startsWith(root.toLowerCase()));
         if (!allowed) { aiLog('media-denied', target); return new Response('forbidden', { status: 403 }); }
@@ -158,13 +212,58 @@ else {
         return new Response(String(error), { status: 500 });
       }
     });
+    // Scanning happens in the background so a large Steam library can never
+    // delay the first paint.
+    void refreshWallpapers(true);
+
+    /**
+     * Picks files with the OS dialog and copies them straight into their
+     * folder. The renderer never sees the bytes: base64-ing a 200 MB clip over
+     * IPC is wasteful, and the old in-page <input type=file> path hung forever
+     * when the user cancelled, freezing every later button in the app.
+     */
+    const importViaDialog = async (bucket: MediaBucket, title: string, filters: { name: string; extensions: string[] }[]) => {
+      const picked = await dialog.showOpenDialog(win!, { title, properties: ['openFile', 'multiSelections'], filters });
+      if (picked.canceled) return { canceled: true, items: [] as { name: string; size: number; mime: string; modified: number }[] };
+      const items = [];
+      for (const source of picked.filePaths) {
+        try { items.push(await copyIntoBucket(vault, bucket, source)); }
+        catch (error) { aiLog('import-failed', `${source} ${error instanceof Error ? error.message : String(error)}`); }
+      }
+      return { canceled: false, items };
+    };
+
 
     const configSnapshot = () => {
       const session = config.session;
       const current = session.userId ? config.getUser(session.userId) : null;
+      // A switched-off plugin leaves the picker entirely: seeing it there and
+      // then getting "this backend is off" is just a trap.
+      const offIds = new Set(plugins.sources.filter(source => !source.enabled).map(source => source.id));
       return {
         activeProvider: config.activeProvider,
-        providers: Object.entries(config.raw.providers).map(([id, p]) => ({ id, baseUrl: p.baseUrl, model: p.model, hasKey: Boolean(p.apiKeySealed) })),
+        providers: Object.entries(config.raw.providers)
+          .filter(([id]) => !offIds.has(id))
+          .map(([id, p]) => {
+            const plugin = plugins.providers.find(entry => entry.id === id);
+            return {
+              id,
+              // A plugin is the authority on its own endpoint and model list;
+              // whatever the config holds is only ever a user-made copy.
+              // A hand-registered backend carries its own display name.
+              label: p.label ?? plugin?.label ?? PROVIDER_LABELS[id] ?? id,
+              baseUrl: plugin ? plugin.baseUrl ?? '' : p.baseUrl,
+              model: plugin?.model ?? p.model,
+              models: plugin?.models ? [...plugin.models] : [],
+              hasKey: Boolean(p.apiKeySealed),
+              custom: Boolean(p.custom),
+              // A plugin that owns its transport (WorkBuddy's local CLI, for one)
+              // needs neither an endpoint nor a key. The settings screen hides those
+              // fields, because leaving them visible made the user think one was
+              // still missing before the backend could work.
+              needsKey: providerNeedsKey(plugin),
+            };
+          }),
         profile: config.profile,
         media: config.media,
         users: config.users.map(u => ({
@@ -193,7 +292,7 @@ else {
         op, id, document, passcode, next, confirmation, ids, lat, lon, locale, query, prompt, messages, task, system,
         template, markdown, name, mime, data, bgm, avatar, username, signature, provider, clientId, redirectUri, state,
         codeChallenge, code, codeVerifier, baseUrl, model, url,
-        kind, folder, fit, dim, blur, path, title, animated,
+        kind, folder, fit, dim, blur, opacity, brightness, path, title, animated, file,
         pluginId, enabled, network, location, mode, label,
       } = request;
       switch (op) {
@@ -231,6 +330,37 @@ else {
           if (typeof model === 'string') config.setProvider(id, { model });
           if (typeof next === 'string' && next) await config.setSecret(id, next);
           if (id) config.activeProvider = id;
+          // A plugin re-asserts its own endpoint and model list, so a stray
+          // write cannot leave it advertising another backend's values.
+          await syncPluginProviders(config, plugins.providers);
+          await config.save();
+          return configSnapshot();
+        }
+        // ----- User-created backends (AI 模型 → 用户自定义模型) -----
+        case 'provider:create': {
+          const wanted = typeof id === 'string' ? id.trim() : '';
+          if (!wanted) throw new Error('请填写模型名称');
+          // The id doubles as a stable key, so it must survive a round trip.
+          if (!/^[A-Za-z0-9._-]{1,40}$/.test(wanted)) throw new Error('名称只能用字母、数字、点、下划线和连字符（最多 40 个字符）');
+          if (DEFAULT_PROVIDER_IDS.has(wanted) || plugins.providers.some(plugin => plugin.id === wanted)) throw new Error('这个名字已被内置或插件占用，换一个');
+          config.setProvider(wanted, {
+            baseUrl: typeof baseUrl === 'string' ? baseUrl.trim() : '',
+            model: typeof model === 'string' ? model.trim() : '',
+            label: typeof label === 'string' && label.trim() ? label.trim() : wanted,
+            custom: true,
+          });
+          if (typeof next === 'string' && next) await config.setSecret(wanted, next);
+          config.activeProvider = wanted;
+          await config.save();
+          return configSnapshot();
+        }
+        case 'provider:delete': {
+          if (typeof id !== 'string') throw new Error('Provider id required');
+          const entry = config.raw.providers[id];
+          if (!entry) throw new Error('找不到这个模型');
+          if (!entry.custom) throw new Error('内置模型与插件模型不能删除');
+          if (config.activeProvider === id) config.activeProvider = fallbackProviderId(config, plugins.sources);
+          config.removeProvider(id);
           await config.save();
           return configSnapshot();
         }
@@ -397,8 +527,10 @@ else {
         // ----- Background & wallpaper (the built-in wallpaper plugin) -----
         case 'background:set': {
           const patch: Partial<BackgroundState> = {};
-          if (kind === 'image' || kind === 'video' || kind === 'wallpaper') patch.kind = kind;
+          if (kind === 'image' || kind === 'video' || kind === 'wallpaper' || kind === 'file') patch.kind = kind;
           if (typeof id === 'string' || id === null) patch.media = id ?? null;
+          // Choosing from the background folder: the file name is the whole state.
+          if (typeof file === 'string') { patch.kind = 'file'; patch.file = file; patch.media = null; patch.wallpaper = null; }
           if (typeof path === 'string') {
             patch.wallpaper = { path, title: typeof title === 'string' ? title : '', animated: Boolean(animated) };
             patch.kind = 'wallpaper';
@@ -406,11 +538,45 @@ else {
           if (fit === 'cover' || fit === 'contain' || fit === 'tile' || fit === 'center') patch.fit = fit;
           if (typeof dim === 'number' && Number.isFinite(dim)) patch.dim = Math.min(1, Math.max(0, dim));
           if (typeof blur === 'number' && Number.isFinite(blur)) patch.blur = Math.min(40, Math.max(0, blur));
+          // 0 = 原画质：透明度为零时画面就是素材本来的样子。
+          if (typeof opacity === 'number' && Number.isFinite(opacity)) patch.opacity = Math.min(100, Math.max(0, opacity));
+          if (typeof brightness === 'number' && Number.isFinite(brightness)) patch.brightness = Math.min(150, Math.max(50, brightness));
           config.setBackground(patch);
           await config.save();
           return config.background;
         }
         case 'background:clear': config.clearBackground(); await config.save(); return config.background;
+        // ----- Background & music folders -----
+        // Both are plain, browsable folders. Import goes through the OS dialog
+        // and the bytes never cross IPC, so a 200 MB clip costs nothing and a
+        // cancelled dialog cannot leave the UI stuck.
+        case 'background:import': {
+          const images = { name: '图片与动图', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'avif', 'bmp'] };
+          const clips = { name: '视频', extensions: ['mp4', 'webm', 'mov', 'mkv', 'avi'] };
+          const filters = kind === 'video' ? [clips] : kind === 'image' ? [images] : [images, clips];
+          return importViaDialog('backgrounds', '选择背景文件', filters);
+        }
+        case 'background:list': return listBucket(vault, 'backgrounds');
+        case 'background:openFolder': await shell.openPath(bucketDir(vault, 'backgrounds')); return { ok: true };
+        case 'background:remove': {
+          if (typeof name !== 'string') throw new Error('File name required');
+          if (config.background.kind === 'file' && config.background.file === name) {
+            config.clearBackground();
+            await config.save();
+          }
+          await removeFromBucket(vault, 'backgrounds', name);
+          return listBucket(vault, 'backgrounds');
+        }
+        case 'music:import': return importViaDialog('music', '选择音乐', [
+          { name: '音频', extensions: ['mp3', 'm4a', 'wav', 'ogg', 'oga', 'flac', 'aac', 'weba', 'opus'] },
+        ]);
+        case 'music:list': return listBucket(vault, 'music');
+        case 'music:openFolder': await shell.openPath(bucketDir(vault, 'music')); return { ok: true };
+        case 'music:remove': {
+          if (typeof name !== 'string') throw new Error('File name required');
+          await removeFromBucket(vault, 'music', name);
+          return listBucket(vault, 'music');
+        }
         case 'wallpaper:scan': return await refreshWallpapers(true);
         case 'wallpaper:dir': {
           if (typeof folder === 'string' || folder === null) {
@@ -456,11 +622,24 @@ else {
           errors: plugins.errors,
           directory: plugins.directory,
         };
+        // One switch for both kinds: built-in features (wallpaper, weather …)
+        // and the .mjs AI plugins dropped into the plugins folder.
         case 'plugin:toggle': {
-          if (typeof pluginId !== 'string' || !BUILTIN_PLUGINS.some(plugin => plugin.id === pluginId)) throw new Error('未知插件');
-          config.setPluginEnabled(pluginId, enabled !== false);
+          if (typeof pluginId !== 'string' || !pluginId.trim()) throw new Error('插件 id 不能为空');
+          const next = enabled !== false;
+          if (BUILTIN_PLUGINS.some(plugin => plugin.id === pluginId)) {
+            config.setPluginEnabled(pluginId, next);
+          } else if (plugins.sources.some(source => source.id === pluginId)) {
+            config.setAiPluginEnabled(pluginId, next);
+            for (const source of plugins.sources) if (source.id === pluginId) source.enabled = next;
+            // Switching off the backend in use must not leave the AI broken:
+            // step down to one that still works.
+            if (!next && config.activeProvider === pluginId) config.activeProvider = fallbackProviderId(config, plugins.sources);
+            rebuildAgent();
+            aiLog('plugin-switch', `${pluginId} -> ${next ? 'on' : 'off'}`);
+          } else throw new Error('未知插件');
           await config.save();
-          return { builtin: BUILTIN_PLUGINS.map(plugin => ({ ...plugin, kind: 'builtin' as const, enabled: config.isPluginEnabled(plugin.id) })) };
+          return configSnapshot();
         }
         case 'plugin:openDir': { await shell.openPath(plugins.directory); return { ok: true, directory: plugins.directory }; }
         // ----- AI agent -----

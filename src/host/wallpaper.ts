@@ -116,6 +116,30 @@ async function readProject(dir: string): Promise<Record<string, unknown> | null>
   return null;
 }
 
+/**
+ * Some wallpapers keep project.json one level down (`<id>/<name>/project.json`),
+ * which used to make them invisible even though the folder was plainly there.
+ */
+async function findProjectDir(dir: string): Promise<string> {
+  if (await readProject(dir)) return dir;
+  let children: string[];
+  try { children = await readdir(dir); } catch { return dir; }
+  for (const child of children) {
+    const sub = join(dir, child);
+    if (!await isDir(sub)) continue;
+    if (await readProject(sub)) return sub;
+  }
+  return dir;
+}
+
+/**
+ * Two spellings of the same folder — a trailing slash, a backslash, or a
+ * different case — used to survive de-duplication and show the wallpaper twice.
+ */
+function folderKey(dir: string): string {
+  return dir.replaceAll('\\', '/').replace(/\/+$/, '').toLowerCase();
+}
+
 async function firstFileWith(dir: string, extensions: Set<string>): Promise<string | null> {
   let names: string[];
   try { names = await readdir(dir); } catch { return null; }
@@ -132,35 +156,50 @@ async function findPreview(dir: string): Promise<string | null> {
   return firstFileWith(dir, IMAGE_EXT);
 }
 
-/** Normalises project.json into something the UI can render and apply. */
+/**
+ * Normalises a wallpaper folder into something the UI can render and apply.
+ *
+ * A folder with no project.json used to be dropped silently, which is why
+ * perfectly good wallpapers in the library never showed up. Anything that can
+ * be played or previewed is listed now; the type is simply guessed as `other`.
+ */
 async function toEntry(dir: string, source: WallpaperSource, id: string): Promise<WallpaperEntry | null> {
-  const json = await readProject(dir);
-  if (!json) return null;
-  const rawType = String(json.type ?? '').toLowerCase();
+  const projectDir = await findProjectDir(dir);
+  const json = await readProject(projectDir);
+  const rawType = String(json?.type ?? '').toLowerCase();
   const type: WallpaperKind = (['video', 'scene', 'web', 'application', 'text'] as const).includes(rawType as never)
     ? rawType as WallpaperKind : 'other';
-  const title = String(json.title ?? '').trim() || basename(dir);
-  const declared = typeof json.file === 'string' ? json.file : '';
-  const declaredPath = declared ? join(dir, declared) : '';
-  const preview = await findPreview(dir);
+  const title = String(json?.title ?? '').trim() || basename(dir);
+  const declared = typeof json?.file === 'string' ? json.file : '';
+  const declaredPath = declared ? join(projectDir, declared) : '';
+  const preview = await findPreview(projectDir);
 
   let media: string | null = null;
   if (type === 'video') {
     if (declaredPath && await exists(declaredPath)) media = declaredPath;
-    else media = await firstFileWith(dir, VIDEO_EXT);
+    else media = await firstFileWith(projectDir, VIDEO_EXT);
   }
   // scene/web/application projects need Wallpaper Engine's own renderer, so the
   // best a plain Electron window can do is animate their preview file.
   if (!media && type !== 'video' && preview && (extname(preview).toLowerCase() === '.gif' || VIDEO_EXT.has(extname(preview).toLowerCase()))) media = preview;
   if (!media && type !== 'video' && preview) media = preview;
+  // Last resort for folders with no project.json at all: play whatever clip or
+  // picture sits inside, otherwise there is nothing to show.
+  if (!media) media = await firstFileWith(dir, VIDEO_EXT) ?? await firstFileWith(dir, IMAGE_EXT) ?? null;
+
+  // Nothing renderable means nothing to offer — listing it would only produce a
+  // card that cannot be applied.
+  if (!media && !preview) return null;
 
   const mediaExt = media ? extname(media).toLowerCase() : '';
   const animated = VIDEO_EXT.has(mediaExt) || mediaExt === '.gif' || mediaExt === '.webp';
-  const note = type === 'video'
-    ? (media && mediaExt === '.gif' ? '未找到视频文件，改用预览动图' : '')
-    : type === 'scene' || type === 'web' || type === 'application'
-      ? '此壁纸需要 Wallpaper Engine 渲染，这里使用它的预览图/动图'
-      : '';
+  const note = !json
+    ? '这个目录没有 project.json，按文件夹里的媒体文件直接播放'
+    : type === 'video'
+      ? (media && mediaExt === '.gif' ? '未找到视频文件，改用预览动图' : '')
+      : type === 'scene' || type === 'web' || type === 'application'
+        ? '此壁纸需要 Wallpaper Engine 渲染，这里使用它的预览图/动图'
+        : '';
 
   return {
     id: id || basename(dir),
@@ -193,15 +232,44 @@ async function scanPlainFolder(dir: string): Promise<WallpaperEntry[]> {
   return entries;
 }
 
-/** Scans one wallpaper_engine directory (myprojects + defaultprojects + workshop). */
-export async function scanEngine(engineDir: string): Promise<WallpaperEntry[]> {
-  const entries: WallpaperEntry[] = [];
+/**
+ * Every folder under a Wallpaper Engine root that can hold projects.
+ *
+ * The two well-known `projects/*` folders and the workshop app are named
+ * explicitly; the rest of `projects/` and `workshop/content/` is walked too,
+ * because a wallpaper living in any other subfolder used to be invisible.
+ */
+async function projectGroups(engineDir: string): Promise<{ path: string; source: WallpaperSource }[]> {
   const groups: { path: string; source: WallpaperSource }[] = [
     { path: join(engineDir, 'projects', 'myprojects'), source: 'myprojects' },
     { path: join(engineDir, 'projects', 'defaultprojects'), source: 'defaultprojects' },
     { path: join(engineDir, 'workshop', 'content', '431960'), source: 'workshop' },
   ];
-  for (const group of groups) {
+  const seen = new Set(groups.map(group => folderKey(group.path)));
+  const extras: { root: string; source: WallpaperSource }[] = [
+    { root: join(engineDir, 'projects'), source: 'defaultprojects' },
+    { root: join(engineDir, 'workshop', 'content'), source: 'workshop' },
+  ];
+  for (const extra of extras) {
+    if (!await isDir(extra.root)) continue;
+    let children: string[];
+    try { children = await readdir(extra.root); } catch { continue; }
+    for (const child of children) {
+      const path = join(extra.root, child);
+      const key = folderKey(path);
+      if (seen.has(key)) continue;
+      if (!await isDir(path)) continue;
+      seen.add(key);
+      groups.push({ path, source: extra.source });
+    }
+  }
+  return groups;
+}
+
+/** Scans one wallpaper_engine directory. */
+export async function scanEngine(engineDir: string): Promise<WallpaperEntry[]> {
+  const entries: WallpaperEntry[] = [];
+  for (const group of await projectGroups(engineDir)) {
     if (!await isDir(group.path)) continue;
     let children: string[];
     try { children = await readdir(group.path); } catch { continue; }
@@ -227,13 +295,17 @@ export interface WallpaperScan {
  * folder (which may be an engine root or a plain directory of wallpapers).
  */
 export async function scanWallpapers(customDir?: string): Promise<WallpaperScan> {
-  const engines = await detectEngineDirs();
+  // Two Steam roots can point at the same library through different spellings,
+  // and a hand-picked folder often is one already detected — either way the
+  // wallpaper appeared twice. The folder key collapses those spellings.
+  const engines = [...new Map((await detectEngineDirs()).map(dir => [folderKey(dir), dir])).values()];
   const entries: WallpaperEntry[] = [];
   const seen = new Set<string>();
   const push = (list: WallpaperEntry[]) => {
     for (const entry of list) {
-      if (seen.has(entry.dir)) continue;
-      seen.add(entry.dir);
+      const key = folderKey(entry.dir);
+      if (seen.has(key)) continue;
+      seen.add(key);
       entries.push(entry);
     }
   };

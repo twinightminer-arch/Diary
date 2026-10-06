@@ -44,7 +44,7 @@ function toast(message: string): void {
 function failureMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   if (/api key|apiKey|unauthor|401|403|not configured|missing|provider|fetch failed|ENOTFOUND|ECONNREFUSED/i.test(message)) {
-    return `${message}（请打开「设置 → AI」填写服务地址、模型与 API Key）`;
+    return `${message}（请打开侧边栏「AI 模型」，选择并启用一个模型）`;
   }
   return message;
 }
@@ -474,7 +474,7 @@ async function sendChat(text: string): Promise<void> {
     const local = offlineAnswer(prompt);
     chatLog.push(local
       ? { role: 'assistant', text: local, note: '以上来自本机资料库，未联网核验。配置 AI 服务后可获得联网问答。' }
-      : { role: 'assistant', text: `暂时无法获取回答：${failureMessage(error)}`, note: '可以在「设置 → AI」中检查服务地址、模型与 API Key。' });
+      : { role: 'assistant', text: `暂时无法获取回答：${failureMessage(error)}`, note: '可以在侧边栏「AI 模型」里检查已启用的模型。' });
   } finally {
     chatBusy = false;
     paintChat();
@@ -539,21 +539,26 @@ async function paintAiState(): Promise<void> {
   const name = node('aiStateName'), detail = node('aiStateDetail'), mark = node('aiStateMark');
   if (!name || !detail || !mark) return;
   try {
-    const cfg = await call<{ activeProvider: string; providers: { id: string; baseUrl: string; model: string; hasKey: boolean }[] }>({ op: 'config:get' });
+    const cfg = await call<{
+      activeProvider: string;
+      providers: { id: string; label?: string; baseUrl: string; model: string; hasKey: boolean; needsKey?: boolean }[];
+    }>({ op: 'config:get' });
     const active = cfg.providers.find(provider => provider.id === cfg.activeProvider) ?? cfg.providers[0];
-    if (active?.hasKey) {
+    // A backend that owns its transport (the WorkBuddy plugin) needs no key, so
+    // "has a key" is not what decides whether the assistant is ready.
+    if (active && (active.hasKey || active.needsKey === false)) {
       mark.textContent = '✓';
-      name.textContent = `${active.id} · ${active.model || active.baseUrl}`;
+      name.textContent = `${active.label ?? active.id} · ${active.model || active.baseUrl}`;
       detail.textContent = 'AI 服务已配置，可以直接提问。';
     } else {
       mark.textContent = '!';
       name.textContent = '尚未配置 AI 服务';
-      detail.textContent = '打开「设置 → AI」填写服务地址、模型与 API Key 后即可问答。';
+      detail.textContent = '打开侧边栏「AI 模型」选择并启用一个模型后即可问答。';
     }
   } catch {
     mark.textContent = '!';
     name.textContent = '无法读取配置';
-    detail.textContent = '请打开「设置 → AI」检查服务配置。';
+    detail.textContent = '请打开侧边栏「AI 模型」检查服务配置。';
   }
 }
 
