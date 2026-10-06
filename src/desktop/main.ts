@@ -127,7 +127,7 @@ else {
             new Promise<string>((_, reject) => setTimeout(() => reject(new Error('Google 登录超时（5 分钟），请在浏览器完成授权后重试。')), 5 * 60_000)),
           ]);
           const token = await exchangeCode('google' as OAuthProvider, {
-            clientId, code, codeVerifier: verifier, redirectUri, clientSecret: GOOGLE_DESKTOP_CLIENT_SECRET,
+            clientId, code, codeVerifier: verifier, redirectUri, clientSecret: process.env.GOOGLE_DESKTOP_CLIENT_SECRET || GOOGLE_DESKTOP_CLIENT_SECRET,
           });
           config.setOAuth('google', token.access_token); await config.save();
           let profile = { email: '', name: '', picture: '' };

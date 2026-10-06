@@ -47,12 +47,18 @@ const ENDPOINTS: Record<OAuthProvider, OAuthEndpoints> = {
 };
 
 /**
- * Google OAuth 2.0 client IDs. The desktop client is a "Desktop app" type and
- * ships with a (public, not secret) client secret; the Android client is an
- * "Android" type identified by package name + signing SHA-1 and has no secret.
+ * Google OAuth 2.0 client IDs.
+ * - The desktop client is a "Desktop app" type and uses the OAuth 2.0 PKCE
+ *   flow (loopback redirect). Per Google's guidance, native/desktop public
+ *   clients do NOT need (and should not ship) a client secret. The secret is
+ *   therefore left empty here and may be injected at build time via the
+ *   GOOGLE_DESKTOP_CLIENT_SECRET environment variable if your Google Cloud
+ *   project still requires one.
+ * - The Android client is an "Android" type identified by package name +
+ *   signing SHA-1 and has no secret.
  */
 export const GOOGLE_DESKTOP_CLIENT_ID = 'REMOVED_GOOGLE_DESKTOP_CLIENT_ID';
-export const GOOGLE_DESKTOP_CLIENT_SECRET = 'REMOVED_GOOGLE_DESKTOP_CLIENT_SECRET';
+export const GOOGLE_DESKTOP_CLIENT_SECRET = '';
 export const GOOGLE_ANDROID_CLIENT_ID = '933958043196-8otpn6ub49h2oo2agrdjocljl5p3559g.apps.googleusercontent.com';
 export const GOOGLE_ANDROID_REDIRECT = `com.googleusercontent.apps.${GOOGLE_ANDROID_CLIENT_ID}:/oauth2callback`;
 export const GOOGLE_USERINFO = 'https://openidconnect.googleapis.com/v1/userinfo';
