@@ -94,6 +94,35 @@ test('the flat pre-plugin background value migrates into the new shape', async (
     const reloaded = await HostConfig.open(root);
     assert.equal(reloaded.media.background.kind, 'image');
     assert.equal(reloaded.media.background.media, 'legacy-bg');
-    assert.equal(reloaded.media.background.fit, 'cover');
+    // 默认「完整显示」：原画质、不裁切、不放大。
+    assert.equal(reloaded.media.background.fit, 'contain');
+    // 迁移出来的配置必须带上新的可读性字段，否则面板会拿到 undefined。
+    assert.equal(reloaded.media.chrome.fontCustom, false);
+    assert.equal(reloaded.media.chrome.fontSize, 15);
+    assert.equal(reloaded.media.chrome.topbarColor, '');
+  } finally { cleanup(); }
+});
+
+test('chrome settings round-trip and reject malformed values', async () => {
+  const { root, config, cleanup } = await fresh();
+  try {
+    config.setChrome({ fontCustom: true, fontColor: '#FF8800', fontSize: 19, topbarColor: '#101a31' });
+    await config.save();
+    const reloaded = await HostConfig.open(root);
+    assert.equal(reloaded.media.chrome.fontCustom, true);
+    // 颜色统一小写，方便前端直接比较。
+    assert.equal(reloaded.media.chrome.fontColor, '#ff8800');
+    assert.equal(reloaded.media.chrome.fontSize, 19);
+    assert.equal(reloaded.media.chrome.topbarColor, '#101a31');
+
+    // 非法颜色 / 越界字号必须被消毒，坏值不能落盘。
+    reloaded.setChrome({ fontColor: 'red', fontSize: 999, topbarColor: 'not-a-colour' });
+    assert.equal(reloaded.media.chrome.fontColor, '#20283a');
+    assert.equal(reloaded.media.chrome.fontSize, 24);
+    assert.equal(reloaded.media.chrome.topbarColor, '');
+
+    // 空串顶栏 = 跟随主题，是合法状态，不能被当成坏值。
+    reloaded.setChrome({ topbarColor: '' });
+    assert.equal(reloaded.media.chrome.topbarColor, '');
   } finally { cleanup(); }
 });

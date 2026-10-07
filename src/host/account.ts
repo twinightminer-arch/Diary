@@ -188,7 +188,7 @@ const ENDPOINTS: Record<OAuthProvider, OAuthEndpoints> = {
  * - The Android client is an "Android" type identified by package name +
  *   signing SHA-1 and has no secret.
  */
-export const GOOGLE_DESKTOP_CLIENT_ID = 'REMOVED_GOOGLE_DESKTOP_CLIENT_ID';
+export const GOOGLE_DESKTOP_CLIENT_ID = '933958043196-c8ktud98bdmkbiovnns1dst47b7mcb19.apps.googleusercontent.com';
 export const GOOGLE_DESKTOP_CLIENT_SECRET = '';
 export const GOOGLE_ANDROID_CLIENT_ID = '933958043196-8otpn6ub49h2oo2agrdjocljl5p3559g.apps.googleusercontent.com';
 export const GOOGLE_ANDROID_REDIRECT = `com.googleusercontent.apps.${GOOGLE_ANDROID_CLIENT_ID}:/oauth2callback`;

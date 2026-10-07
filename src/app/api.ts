@@ -20,6 +20,8 @@ export type Request = {
   /** Wallpaper transparency (0 = original quality) and brightness in percent. */
   opacity?: number; brightness?: number;
   path?: string; title?: string; animated?: boolean; file?: string;
+  /** 字体与顶栏配色（照搬 DSH 壁纸插件的那套可读性设置）。 */
+  fontCustom?: boolean; fontColor?: string; fontSize?: number; topbarColor?: string;
   /** Plugin manager + permission switches. */
   pluginId?: string; enabled?: boolean; network?: boolean; location?: boolean;
   mode?: string; label?: string;

@@ -91,7 +91,13 @@ export interface BackgroundState {
   file: string | null;
   /** Wallpaper Engine project, used when kind === 'wallpaper'. */
   wallpaper: WallpaperRef | null;
-  fit: 'cover' | 'contain' | 'tile' | 'center';
+  /**
+   * How the wallpaper is fitted into the work area. `contain` is the default:
+   * the whole frame is shown at its own resolution, never cropped, never blown
+   * up. `fill` stretches to cover every pixel (may distort); `cover` fills by
+   * cropping; `tile` repeats; `center` shows it at 1:1.
+   */
+  fit: 'cover' | 'contain' | 'fill' | 'tile' | 'center';
   /** Black overlay opacity 0…1, so text stays readable over busy wallpapers. */
   dim: number;
   /** Backdrop blur in px. */
@@ -105,6 +111,23 @@ export interface BackgroundState {
   /** Brightness in percent; 100 is the clip as encoded. */
   brightness: number;
 }
+/**
+ * Typography and top-bar chrome — the readability half of the wallpaper plugin.
+ * A wallpaper can be any colour, so the text on top of it has to be adjustable.
+ * Ported from the DSH wallpaper plugin: one master switch, and when it is off
+ * every variable is removed so the app looks exactly as it did before.
+ */
+export interface ChromeState {
+  /** Off = inject nothing at all; the native look comes back. */
+  fontCustom: boolean;
+  /** `#rrggbb`. Applied to the text that sits directly on the wallpaper. */
+  fontColor: string;
+  /** Body size in px. Everything else scales by the same ratio. */
+  fontSize: number;
+  /** Top bar background; empty means "follow the theme". */
+  topbarColor: string;
+}
+
 export interface PermissionState {
   /** Master switch for every outbound request the app makes. */
   network: boolean;
@@ -131,7 +154,7 @@ export interface PersistedConfig {
     oauthClients: Record<string, string>;
   };
   profile: { username: string; avatar: string | null; signature: string };
-  media: { background: BackgroundState; bgm: string | null };
+  media: { background: BackgroundState; bgm: string | null; chrome: ChromeState };
   /** Built-in feature switches, e.g. { wallpaper: false } disables the plugin. */
   plugins: { disabled: string[] };
   /** On/off switch per AI plugin file in <userData>/plugins. Missing = on. */
@@ -159,8 +182,32 @@ export const DEFAULT_PROVIDER_IDS: ReadonlySet<string> = new Set(Object.keys(DEF
 
 export const EMPTY_BACKGROUND: BackgroundState = {
   kind: null, media: null, file: null, wallpaper: null,
-  fit: 'cover', dim: 0, blur: 0, opacity: 0, brightness: 100,
+  // 完整显示为默认：画面原画质、不裁切、不放大。
+  fit: 'contain', dim: 0, blur: 0, opacity: 0, brightness: 100,
 };
+
+/** Design baseline: every other text size is expressed as a ratio of this. */
+export const BASE_FONT_SIZE = 15;
+export const CHROME_DEFAULTS: ChromeState = { fontCustom: false, fontColor: '#20283a', fontSize: BASE_FONT_SIZE, topbarColor: '' };
+
+/** A hex colour is either exactly `#rrggbb` or rejected; empty means "unset". */
+function sanitiseHex(value: unknown, fallback: string, allowEmpty = false): string {
+  if (typeof value !== 'string') return fallback;
+  const text = value.trim();
+  if (!text) return allowEmpty ? '' : fallback;
+  return /^#[0-9a-fA-F]{6}$/.test(text) ? text.toLowerCase() : fallback;
+}
+
+function sanitiseChrome(raw: unknown): ChromeState {
+  const input = (raw ?? {}) as Partial<ChromeState>;
+  const size = Number(input.fontSize);
+  return {
+    fontCustom: Boolean(input.fontCustom),
+    fontColor: sanitiseHex(input.fontColor, CHROME_DEFAULTS.fontColor),
+    fontSize: Number.isFinite(size) ? Math.min(24, Math.max(11, size)) : CHROME_DEFAULTS.fontSize,
+    topbarColor: sanitiseHex(input.topbarColor, '', true),
+  };
+}
 
 /** Clamps one background number into its documented range. */
 export function clampBackgroundNumber(field: 'dim' | 'blur' | 'opacity' | 'brightness', value: number): number {
@@ -177,7 +224,7 @@ function defaultConfig(): PersistedConfig {
     providers: structuredClone(DEFAULT_PROVIDERS),
     account: { users: [], session: { userId: null, remember: false }, google: null, tokens: {}, oauthClients: {} },
     profile: { username: '', avatar: null, signature: '' },
-    media: { background: structuredClone(EMPTY_BACKGROUND), bgm: null },
+    media: { background: structuredClone(EMPTY_BACKGROUND), bgm: null, chrome: structuredClone(CHROME_DEFAULTS) },
     plugins: { disabled: [] },
     pluginStates: {},
     // Offline-first: nothing leaves the machine until the user opts in.
@@ -200,13 +247,14 @@ function sanitiseBackground(raw: Partial<BackgroundState>): BackgroundState {
 }
 
 /** Folds the pre-plugin `background: <media id>` shape into the new model. */
-function normalizeMedia(raw: unknown): { background: BackgroundState; bgm: string | null } {
-  const media = (raw ?? {}) as { background?: unknown; bgm?: unknown };
+function normalizeMedia(raw: unknown): PersistedConfig['media'] {
+  const media = (raw ?? {}) as { background?: unknown; bgm?: unknown; chrome?: unknown };
   const bgm = typeof media.bgm === 'string' ? media.bgm : null;
+  const chrome = sanitiseChrome(media.chrome);
   const flat = media.background;
-  if (typeof flat === 'string') return { background: { ...structuredClone(EMPTY_BACKGROUND), kind: 'image', media: flat }, bgm };
-  if (flat && typeof flat === 'object') return { background: sanitiseBackground(flat as Partial<BackgroundState>), bgm };
-  return { background: structuredClone(EMPTY_BACKGROUND), bgm };
+  if (typeof flat === 'string') return { background: { ...structuredClone(EMPTY_BACKGROUND), kind: 'image', media: flat }, bgm, chrome };
+  if (flat && typeof flat === 'object') return { background: sanitiseBackground(flat as Partial<BackgroundState>), bgm, chrome };
+  return { background: structuredClone(EMPTY_BACKGROUND), bgm, chrome };
 }
 
 /**
@@ -349,6 +397,13 @@ export class HostConfig {
   get background(): Readonly<BackgroundState> { return this.#data.media.background; }
   get wallpaperDir(): string | null { return this.#data.wallpaperDir; }
   setWallpaperDir(dir: string | null): void { this.#data.wallpaperDir = dir; }
+
+  // ---- Typography / top bar ----
+  /** Current chrome settings. Always sanitised, never a raw hand-edited value. */
+  get chrome(): Readonly<ChromeState> { return this.#data.media.chrome; }
+  setChrome(patch: Partial<ChromeState>): void {
+    this.#data.media = { ...this.#data.media, chrome: sanitiseChrome({ ...this.#data.media.chrome, ...patch }) };
+  }
 
   // ---- Permissions & location ----
   get permissions(): Readonly<PermissionState> { return this.#data.permissions; }

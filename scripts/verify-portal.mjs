@@ -283,7 +283,8 @@ try {
     opacity: document.getElementById('bgOpacity')?.max,
     brightness: document.getElementById('bgBrightness')?.value,
     // The wallpaper must sit inside <main>, never behind the sidebar.
-    insideMain: Boolean(document.querySelector('main .bg-stage #bgImage')),
+    // 铺满改造后图层直接挂在 main 下（旧的 .bg-stage 包装已移除）。
+    insideMain: Boolean(document.querySelector('main > #bgImage')),
     openLibraryGone: document.getElementById('bgOpenLibrary') === null,
   }));
   check('background: three import sources offered (the redundant library card is gone)',
@@ -383,18 +384,20 @@ try {
   check('background: layer painted through the media scheme', layer.hasBg && !layer.hidden && layer.width > 200 && layer.url.startsWith('url("diary-wallpaper:'), JSON.stringify(layer));
   check('background: dim + blur applied', layer.dim === '0.3' && layer.blur === '6px', `dim=${layer.dim} blur=${layer.blur}`);
 
-  // A dark wallpaper must not swallow the page text.
+  // A busy wallpaper must not swallow the page text. 现在靠三件东西兜底：白纱遮罩层、
+  // 标题的白色光晕、以及用户可以自己调的字体颜色 —— 所以检查这三条链路都在。
   const readability = await page.evaluate(() => {
-    const main = document.querySelector('main');
     const heading = document.querySelector('.view-heading, .section-head');
+    const veil = document.getElementById('bgVeilLayer');
     return {
       hasBg: document.body.classList.contains('has-bg'),
-      wash: getComputedStyle(main).backgroundColor,
+      veilPainted: Boolean(veil) && !veil.hasAttribute('hidden'),
       halo: heading ? getComputedStyle(heading).textShadow : 'none',
+      fontOverride: document.getElementById('chromeFontColor') !== null,
     };
   });
   check('background: content area stays readable over the wallpaper',
-    readability.hasBg && readability.wash !== 'rgba(0, 0, 0, 0)' && readability.halo !== 'none',
+    readability.hasBg && readability.veilPainted && readability.halo !== 'none' && readability.fontOverride,
     JSON.stringify(readability));
 
   // ---------- permissions ----------

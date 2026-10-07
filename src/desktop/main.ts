@@ -8,7 +8,7 @@ import { createServer } from 'node:http';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { MarkdownEngine } from '../storage/markdown-engine.ts';
 import type { Request } from '../app/api.ts';
-import { HostConfig, DEFAULT_PROVIDER_IDS, type BackgroundState, type LocationState, type PermissionState } from '../host/config.ts';
+import { HostConfig, DEFAULT_PROVIDER_IDS, type BackgroundState, type ChromeState, type LocationState, type PermissionState } from '../host/config.ts';
 import { loadPlugins, providerNeedsKey, type ProviderPlugin } from '../host/plugins.ts';
 import { buildAgent } from '../agent/skills.ts';
 import { batchEncrypt, batchDecrypt, batchChangePasscode } from '../host/batch.ts';
@@ -27,6 +27,13 @@ import {
 
 app.setName('Diary');
 if (process.env.DIARY_TEST_HOME) app.setPath('userData', process.env.DIARY_TEST_HOME);
+
+// 动态壁纸必须一直动。Chromium 默认在窗口失焦/被遮挡/最小化时把渲染进程降频，
+// 媒体解码随之停摆 —— 用户看到的就是「动态壁纸卡成静态」。这里关掉的是节流本身，
+// 不会给前台渲染增加任何负担：Diary 只有一个窗口，且这些开关从不降级 GPU。
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
 
 // Wallpapers and imported clips live outside the app bundle, and the renderer
 // runs under a CSP that rejects file:// URLs. A privileged custom scheme is the
@@ -294,6 +301,7 @@ else {
         codeChallenge, code, codeVerifier, baseUrl, model, url,
         kind, folder, fit, dim, blur, opacity, brightness, path, title, animated, file,
         pluginId, enabled, network, location, mode, label,
+        fontCustom, fontColor, fontSize, topbarColor,
       } = request;
       switch (op) {
         case 'list': return engine.listEntries();
@@ -535,7 +543,7 @@ else {
             patch.wallpaper = { path, title: typeof title === 'string' ? title : '', animated: Boolean(animated) };
             patch.kind = 'wallpaper';
           }
-          if (fit === 'cover' || fit === 'contain' || fit === 'tile' || fit === 'center') patch.fit = fit;
+          if (fit === 'cover' || fit === 'contain' || fit === 'fill' || fit === 'tile' || fit === 'center') patch.fit = fit;
           if (typeof dim === 'number' && Number.isFinite(dim)) patch.dim = Math.min(1, Math.max(0, dim));
           if (typeof blur === 'number' && Number.isFinite(blur)) patch.blur = Math.min(40, Math.max(0, blur));
           // 0 = 原画质：透明度为零时画面就是素材本来的样子。
@@ -546,6 +554,18 @@ else {
           return config.background;
         }
         case 'background:clear': config.clearBackground(); await config.save(); return config.background;
+        // ----- 壁纸可读性：字体颜色 / 字号 / 顶栏底色 -----
+        // 壁纸可以是任意颜色，压在上面的文字必须跟着调。空字符串 = 交还给主题。
+        case 'chrome:set': {
+          const patch: Partial<ChromeState> = {};
+          if (typeof fontCustom === 'boolean') patch.fontCustom = fontCustom;
+          if (typeof fontColor === 'string') patch.fontColor = fontColor;
+          if (typeof fontSize === 'number' && Number.isFinite(fontSize)) patch.fontSize = fontSize;
+          if (typeof topbarColor === 'string') patch.topbarColor = topbarColor;
+          config.setChrome(patch);
+          await config.save();
+          return config.chrome;
+        }
         // ----- Background & music folders -----
         // Both are plain, browsable folders. Import goes through the OS dialog
         // and the bytes never cross IPC, so a 200 MB clip costs nothing and a
@@ -716,7 +736,9 @@ else {
     win = new BrowserWindow({
       width: 1280, height: 850, minWidth: 760, minHeight: 560, title: 'Diary',
       backgroundColor: '#f8f7f4', icon: join(appDir, '../assets/icon.ico'), show: !process.env.DIARY_TEST_HOME,
-      webPreferences: { preload: join(appDir, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: process.env.DIARY_TEST_NO_SANDBOX !== '1' },
+      // backgroundThrottling:false —— 失焦时也不许 Chromium 给本窗口降频，否则
+      // 切出去再切回来，壁纸视频会停在失焦那一帧（「卡成静态」的另一个入口）。
+      webPreferences: { preload: join(appDir, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, sandbox: process.env.DIARY_TEST_NO_SANDBOX !== '1' },
     });
     win.setMenuBarVisibility(false);
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));

@@ -203,7 +203,7 @@ type BackgroundState = {
   media: string | null;
   file: string | null;
   wallpaper: { path: string; title: string; animated: boolean } | null;
-  fit: 'cover' | 'contain' | 'tile' | 'center';
+  fit: 'cover' | 'contain' | 'fill' | 'tile' | 'center';
   dim: number; blur: number;
   /** 0 = 原画质（完全不透明）；100 = 完全透明。 */
   opacity: number;
@@ -212,10 +212,24 @@ type BackgroundState = {
 };
 /** One file inside <vault>/backgrounds or <vault>/music. */
 type LibraryItem = { name: string; size: number; mime: string; modified: number };
+/**
+ * 壁纸可读性设置，照搬 DSH 壁纸插件那一套：一个总开关 + 三个可调项。
+ * 关掉开关时不注入任何变量，界面原样回归。
+ */
+type ChromeState = {
+  fontCustom: boolean;
+  fontColor: string;
+  fontSize: number;
+  /** 空字符串 = 跟随主题。 */
+  topbarColor: string;
+};
+/** 与宿主 BASE_FONT_SIZE 保持一致：字号以 15px 为基准按比例缩放。 */
+const CHROME_BASE_FONT_SIZE = 15;
+const CHROME_FALLBACK: ChromeState = { fontCustom: false, fontColor: '#20283a', fontSize: CHROME_BASE_FONT_SIZE, topbarColor: '' };
 /** Used when a snapshot carries no background at all (the Android shell). */
 const NO_BACKGROUND: BackgroundState = {
   kind: null, media: null, file: null, wallpaper: null,
-  fit: 'cover', dim: 0, blur: 0, opacity: 0, brightness: 100,
+  fit: 'contain', dim: 0, blur: 0, opacity: 0, brightness: 100,
 };
 type BuiltinPlugin = { id: string; name: string; description: string; version: string; kind: 'builtin'; enabled: boolean };
 type PluginInfo = { file: string; id: string; label: string; baseUrl: string; model: string; custom: boolean; models: string[]; enabled: boolean };
@@ -229,7 +243,7 @@ type ProviderInfo = {
 type Snapshot = {
   activeProvider: string; providers: ProviderInfo[];
   profile: { username: string; avatar: string | null; signature: string };
-  media: { background: BackgroundState; bgm: string | null };
+  media: { background: BackgroundState; bgm: string | null; chrome?: ChromeState };
   background: BackgroundState;
   permissions: { network: boolean; location: boolean };
   location: { mode: 'auto' | 'manual'; lat: number | null; lon: number | null; label: string };
@@ -626,6 +640,9 @@ async function loadConfig() {
   applyBackground(background);
   applyMusic(musicLibrary, cfg.media?.bgm ?? null);
   renderBackgroundPanel(background);
+  const chrome = cfg.media?.chrome ?? CHROME_FALLBACK;
+  applyChrome(chrome);
+  renderChromePanel(chrome);
   renderBackgroundLibrary(backgroundLibrary, background);
   renderPermissionState(cfg);
   applyPluginVisibility(cfg);
@@ -711,6 +728,112 @@ function musicUrl(name: string): string {
 }
 
 let backgroundRun = 0;
+/** 当前真正铺在屏幕上的素材，用来判断「只改了外观」还是「换了素材」。 */
+let paintedSource: string | null = null;
+let paintedIsVideo = false;
+/** 用户的意图：壁纸应当处于播放状态。Diary 没有「暂停壁纸」按钮，故恒为 true。 */
+let bgWantPlay = false;
+
+/**
+ * 动态壁纸的播放自愈，照搬 DSH 壁纸插件的做法。
+ *
+ * `<video>` 的 `play()` 最常见的失败**不是**浏览器拒绝，而是被紧随其后的换源 /
+ * `load()` 打断（`AbortError`）——那一刻元素已经 `paused`，用户看到的就是冻在首帧
+ * 的静止画面。旧代码把这次 rejection 直接 `.catch(() => {})` 吞掉且从不重试，
+ * 于是「动态壁纸卡成静态」就再也醒不过来。
+ *
+ * 这里的策略是「幂等重试 + 不说谎」：意图为播放而元素确实停着，就再 `play()` 一次；
+ * `AbortError` 属于瞬时失败，允许媒体就绪后反复补播；其余错误（`NotAllowedError` /
+ * `NotSupportedError` …）才记为真拒绝，不再无限重试。
+ */
+function ensureBackgroundPlayback(): void {
+  const video = $<HTMLVideoElement>('bgVideo');
+  if (!bgWantPlay || video.hidden) return;
+  if (!video.paused && !video.ended && !video.error) return;
+  const refused = video.dataset.diaryPlayRefused ?? '';
+  // AbortError 不算真拒绝：换源打断它只是一瞬间的事，补播即可自愈。
+  if (refused && refused !== 'AbortError') return;
+  const attempt = video.play();
+  if (!attempt || typeof attempt.then !== 'function') return;
+  attempt.then(
+    () => { delete video.dataset.diaryPlayRefused; },
+    (error: DOMException) => { video.dataset.diaryPlayRefused = error?.name || '1'; },
+  );
+}
+
+/** 每个 <video> 只挂一次监听，标记留在元素上，换素材也不会重复绑定。 */
+function watchBackgroundVideo(video: HTMLVideoElement): void {
+  if (video.dataset.diaryWatched === '1') return;
+  video.dataset.diaryWatched = '1';
+  // loadeddata/canplay = 媒体就绪 → 补播；pause/ended/stalled = 掉了 → 补播。
+  for (const type of ['loadeddata', 'canplay', 'playing', 'pause', 'ended', 'stalled', 'error', 'emptied']) {
+    video.addEventListener(type, () => { ensureBackgroundPlayback(); });
+  }
+}
+
+/**
+ * 素材刚挂上去的一小段时间里多催几次播放。
+ *
+ * 换素材时元素会先 `removeAttribute('src')` 再写新 src，它可能停留在 NETWORK_EMPTY
+ * 而不主动开始加载 —— 此时 `play()` 的 promise 会一直悬着，`canplay` 也永远不会来，
+ * 光等事件就是「20 秒静止画面」。这道兜底按梯度重试，一旦真的播起来就立刻收手。
+ */
+const BACKGROUND_NUDGE_DELAYS = [500, 1200, 2500, 5000];
+function scheduleBackgroundNudges(run: number): void {
+  for (const delay of BACKGROUND_NUDGE_DELAYS) {
+    window.setTimeout(() => {
+      if (run !== backgroundRun || !bgWantPlay) return;
+      const video = $<HTMLVideoElement>('bgVideo');
+      if (!video.paused && !video.ended && !video.error) return;
+      ensureBackgroundPlayback();
+    }, delay);
+  }
+}
+
+// 从后台切回前台、窗口重新聚焦时再补一次，覆盖任何被系统级调度打断的情况。
+document.addEventListener('visibilitychange', () => { if (!document.hidden) ensureBackgroundPlayback(); });
+window.addEventListener('focus', () => { ensureBackgroundPlayback(); });
+
+/**
+ * blur / brightness 合成为一条 `filter`。两者都在中性值时返回 `none` ——
+ * 无滤镜的元素不建合成层，4K 视频不会再为「模糊 0px、亮度 100%」白跑一遍 GPU。
+ */
+function backgroundFilterValue(blur: number, brightnessPercent: number): string {
+  return blur > 0 || brightnessPercent !== 100
+    ? `blur(${blur}px) brightness(${brightnessPercent / 100})`
+    : 'none';
+}
+
+/**
+ * 纯外观参数（模糊 / 亮度 / 透明度 / 暗角 / 铺法）——只写 CSS 变量和元素样式，
+ * 永远不碰 `src`。这是「拖一次滑块就把正在播的视频打回炉」的分界线。
+ */
+function paintBackgroundAppearance(bg: BackgroundState, image: HTMLElement, video: HTMLVideoElement): void {
+  // 透明度 0 = 原画质：既不动素材本身的透明度，也不盖任何白纱。
+  const fade = fadeOf(bg);
+  const blur = Math.max(0, bg.blur);
+  const brightnessPercent = Math.min(150, Math.max(50, bg.brightness ?? 100));
+  document.documentElement.style.setProperty('--bg-blur', `${blur}px`);
+  document.documentElement.style.setProperty('--bg-brightness', String(brightnessPercent / 100));
+  document.documentElement.style.setProperty('--bg-fade', String(fade));
+  document.documentElement.style.setProperty('--bg-filter', backgroundFilterValue(blur, brightnessPercent));
+  // Only a blurred wallpaper needs to overhang: at 0 blur the frame is drawn
+  // exactly as encoded, so nothing is magnified and nothing is cropped. 无模糊时
+  // 直接 `none`，静止图连合成层都不建。
+  document.documentElement.style.setProperty('--bg-transform', blur > 0 ? 'scale(1.06)' : 'none');
+
+  const fit = bg.fit ?? 'contain';
+  if (paintedIsVideo) {
+    video.style.objectFit = fit === 'cover' ? 'cover' : fit === 'fill' ? 'fill' : 'contain';
+  } else {
+    image.style.backgroundSize = fit === 'contain' ? 'contain'
+      : fit === 'fill' ? '100% 100%'
+        : fit === 'center' || fit === 'tile' ? 'auto' : 'cover';
+    image.style.backgroundRepeat = fit === 'tile' ? 'repeat' : 'no-repeat';
+    image.style.backgroundPosition = 'center';
+  }
+}
+
 /**
  * Paints the active background. Stills use a <div> so 平铺/居中 are possible;
  * clips use a <video> so a 500 MB wallpaper stays a stream instead of a data URL.
@@ -718,48 +841,167 @@ let backgroundRun = 0;
 function applyBackground(bg: BackgroundState): void {
   const run = ++backgroundRun;
   const image = $('bgImage'), video = $<HTMLVideoElement>('bgVideo'), dim = $('bgDimLayer'), veil = $('bgVeilLayer');
-  video.pause(); video.removeAttribute('src'); video.hidden = true;
-  image.hidden = true; image.style.backgroundImage = '';
+  const source = backgroundSourceName(bg);
+  const url = backgroundUrl(bg);
+  const isVideo = Boolean(bg.kind) && Boolean(source) && VIDEO_FILE.test(source);
+
+  // ---- 同一个素材，只改了外观：原地更新，绝不重新加载 ----
+  // 滑块每松一次手都会触发一次 background:set → loadConfig() → 这里。若此时重设
+  // src，正在播放的视频会黑屏重来一次，正是用户报告的「卡顿 / 卡成静态」。
+  if (bg.kind && source && url && source === paintedSource && isVideo === paintedIsVideo) {
+    dim.hidden = false;
+    dim.style.opacity = String(Math.min(1, Math.max(0, bg.dim)));
+    veil.hidden = false;
+    veil.style.opacity = String(fadeOf(bg) * 0.55);
+    paintBackgroundAppearance(bg, image, video);
+    if (isVideo) ensureBackgroundPlayback();
+    return;
+  }
+
+  // ---- 换素材：先把手上的东西干净地撤掉 ----
+  // hidden 必须先于 pause()：补播监听会忽略隐藏元素，否则这里会触发一次无意义的重试。
+  bgWantPlay = false;
+  video.hidden = true;
+  video.pause();
+  video.removeAttribute('src');
+  video.load();   // 真正卸载：清空解码器，否则换素材时会带着旧流一起重置
+  image.hidden = true;
+  image.style.backgroundImage = '';
   dim.hidden = true; dim.style.opacity = '0';
   veil.hidden = true; veil.style.opacity = '0';
   document.body.classList.remove('has-bg');
-  document.documentElement.style.setProperty('--bg-blur', '0px');
-  document.documentElement.style.setProperty('--bg-brightness', '1');
+  paintedSource = null;
+  paintedIsVideo = false;
+  document.documentElement.style.setProperty('--bg-filter', 'none');
+  document.documentElement.style.setProperty('--bg-transform', 'none');
   document.documentElement.style.setProperty('--bg-fade', '0');
   if (!bg.kind) return;
-
-  const source = backgroundSourceName(bg);
-  const url = backgroundUrl(bg);
   if (!source || !url) return;
-  const isVideo = VIDEO_FILE.test(source);
 
-  // 透明度 0 = 原画质：既不动素材本身的透明度，也不盖任何白纱。
-  const fade = Math.min(1, Math.max(0, (bg.opacity ?? 0) / 100));
-  const brightness = Math.min(150, Math.max(50, bg.brightness ?? 100)) / 100;
-  document.documentElement.style.setProperty('--bg-blur', `${Math.max(0, bg.blur)}px`);
-  document.documentElement.style.setProperty('--bg-brightness', String(brightness));
-  document.documentElement.style.setProperty('--bg-fade', String(fade));
   dim.hidden = false;
   dim.style.opacity = String(Math.min(1, Math.max(0, bg.dim)));
   veil.hidden = false;
-  veil.style.opacity = String(fade * 0.55);
+  veil.style.opacity = String(fadeOf(bg) * 0.55);
   document.body.classList.add('has-bg');
   if (run !== backgroundRun) return;
 
+  paintedSource = source;
+  paintedIsVideo = isVideo;
   if (isVideo) {
+    watchBackgroundVideo(video);
+    bgWantPlay = true;
     video.src = url;
-    video.style.objectFit = bg.fit === 'contain' ? 'contain' : 'cover';
     video.hidden = false;
+    // 上一段素材留下的是 NETWORK_EMPTY；不显式 load()，元素可能不会重新开始取流。
+    // 这次 load() 会打断紧随其后的 play()（AbortError），但 AbortError 在我们的
+    // 判定里属于「可重试」，canplay 监听和看门狗都会把它补回来。
     video.load();
-    void video.play().catch(() => undefined);
+    paintBackgroundAppearance(bg, image, video);
+    ensureBackgroundPlayback();
+    scheduleBackgroundNudges(run);
     return;
   }
   image.style.backgroundImage = `url("${url}")`;
-  image.style.backgroundSize = bg.fit === 'contain' ? 'contain' : bg.fit === 'center' || bg.fit === 'tile' ? 'auto' : 'cover';
-  image.style.backgroundRepeat = bg.fit === 'tile' ? 'repeat' : 'no-repeat';
-  image.style.backgroundPosition = 'center';
+  paintBackgroundAppearance(bg, image, video);
   image.hidden = false;
 }
+
+/** 透明度换算成遮罩浓度，两处（增量更新 / 换素材）共用一份算法。 */
+function fadeOf(bg: BackgroundState): number {
+  return Math.min(1, Math.max(0, (bg.opacity ?? 0) / 100));
+}
+
+// ---------- 壁纸可读性：文字颜色 / 字号 / 顶栏底色 ----------
+// 照搬 DSH 壁纸插件的做法：往 :root 注入 CSS 变量；总开关关闭时逐个 removeProperty，
+// 而不是写回「默认值」。变量一旦不存在，CSS 里的 var(--x, fallback) 就各自回落到
+// 原生值，界面与从未设置过完全一致 —— 这是「关掉就干干净净还原」的关键。
+const CHROME_VARS = ['--chrome-font-color', '--chrome-font-scale', '--chrome-topbar-bg', '--chrome-topbar-blur'] as const;
+
+/** 用户是否显式挑过顶栏颜色。空字符串表示「跟随主题」，而 <input type="color"> 表达不了空。 */
+let topbarColorChosen = false;
+
+function applyChrome(chrome: ChromeState): void {
+  const root = document.documentElement;
+  if (!chrome.fontCustom) {
+    for (const name of CHROME_VARS) root.style.removeProperty(name);
+    return;
+  }
+  root.style.setProperty('--chrome-font-color', chrome.fontColor);
+  root.style.setProperty('--chrome-font-scale', String(chrome.fontSize / CHROME_BASE_FONT_SIZE));
+  if (chrome.topbarColor) {
+    root.style.setProperty('--chrome-topbar-bg', chrome.topbarColor);
+    // 顶栏一旦是纯色，毛玻璃就没意义了 —— 每帧一次背景采样就此省掉。
+    root.style.setProperty('--chrome-topbar-blur', 'none');
+  } else {
+    root.style.removeProperty('--chrome-topbar-bg');
+    root.style.removeProperty('--chrome-topbar-blur');
+  }
+}
+
+function renderChromePanel(chrome: ChromeState): void {
+  const custom = $<HTMLInputElement>('chromeCustom');
+  custom.checked = chrome.fontCustom;
+  $('bgChromeBody').hidden = !chrome.fontCustom;
+  $<HTMLInputElement>('chromeFontColor').value = chrome.fontColor;
+  $<HTMLInputElement>('chromeFontSize').value = String(chrome.fontSize);
+  $('chromeFontSizeValue').textContent = `${chrome.fontSize}px`;
+  topbarColorChosen = Boolean(chrome.topbarColor);
+  // <input type="color"> 永远要有一个合法值：没设过时展示主题白，但状态里仍是空。
+  $<HTMLInputElement>('chromeTopbarColor').value = chrome.topbarColor || '#ffffff';
+}
+
+/** 三个控件当前的值，合成一份完整状态 —— 开关本身也从面板上读。 */
+function readChromePanel(): ChromeState {
+  return {
+    fontCustom: $<HTMLInputElement>('chromeCustom').checked,
+    fontColor: $<HTMLInputElement>('chromeFontColor').value,
+    fontSize: Number($<HTMLInputElement>('chromeFontSize').value) || CHROME_BASE_FONT_SIZE,
+    topbarColor: topbarColorChosen ? $<HTMLInputElement>('chromeTopbarColor').value : '',
+  };
+}
+
+/** 保存并重新读回配置：宿主会把颜色和字号都过一遍消毒，不让非法值落盘。 */
+async function saveChrome(patch: Partial<ChromeState>): Promise<void> {
+  await call({ op: 'chrome:set', ...patch });
+  await loadConfig();
+}
+
+$<HTMLInputElement>('chromeCustom').onchange = action(async () => {
+  await saveChrome({ fontCustom: $<HTMLInputElement>('chromeCustom').checked });
+});
+/** 开关勾选的瞬间先本地生效，避免一次 IPC 往返造成的闪动。 */
+$<HTMLInputElement>('chromeCustom').oninput = () => {
+  const state = readChromePanel();
+  $('bgChromeBody').hidden = !state.fontCustom;
+  applyChrome(state.fontCustom ? state : CHROME_FALLBACK);
+};
+
+{
+  const fontColor = $<HTMLInputElement>('chromeFontColor');
+  fontColor.oninput = () => { document.documentElement.style.setProperty('--chrome-font-color', fontColor.value); };
+  fontColor.onchange = action(async () => { await saveChrome({ fontColor: fontColor.value }); });
+
+  const fontSize = $<HTMLInputElement>('chromeFontSize');
+  fontSize.oninput = () => {
+    const size = Number(fontSize.value) || CHROME_BASE_FONT_SIZE;
+    $('chromeFontSizeValue').textContent = `${size}px`;
+    document.documentElement.style.setProperty('--chrome-font-scale', String(size / CHROME_BASE_FONT_SIZE));
+  };
+  fontSize.onchange = action(async () => { await saveChrome({ fontSize: Number(fontSize.value) }); });
+
+  const topbarColor = $<HTMLInputElement>('chromeTopbarColor');
+  topbarColor.oninput = () => {
+    topbarColorChosen = true;
+    document.documentElement.style.setProperty('--chrome-topbar-bg', topbarColor.value);
+    document.documentElement.style.setProperty('--chrome-topbar-blur', 'none');
+  };
+  topbarColor.onchange = action(async () => { await saveChrome({ topbarColor: topbarColor.value }); });
+}
+$('chromeTopbarReset').onclick = action(async () => {
+  topbarColorChosen = false;
+  await saveChrome({ topbarColor: '' });
+  toast('顶栏已跟随主题');
+});
 
 // ---------- Background music: one folder, played in order, then looped ----------
 type Track = { name: string; url: string };
@@ -1043,7 +1285,7 @@ $('accountSet').onclick = action(async () => { showLock(false); });
 // ---------- Google OAuth (real, built-in client IDs) ----------
 const IS_DESKTOP = !!window.diary;
 const GOOGLE_CLIENT_ID = IS_DESKTOP
-  ? 'REMOVED_GOOGLE_DESKTOP_CLIENT_ID'
+  ? '933958043196-c8ktud98bdmkbiovnns1dst47b7mcb19.apps.googleusercontent.com'
   : '933958043196-8otpn6ub49h2oo2agrdjocljl5p3559g.apps.googleusercontent.com';
 const GOOGLE_ANDROID_REDIRECT = 'com.googleusercontent.apps.933958043196-8otpn6ub49h2oo2agrdjocljl5p3559g:/oauth2callback';
 async function pkceChallenge(): Promise<{ verifier: string; challenge: string }> {
@@ -1274,14 +1516,28 @@ $('bgFit').onchange = action(async () => {
  * backwards from most sliders on purpose: 0 is the untouched original, so the
  * preview keeps the clip at full strength until the user asks for less.
  */
+/** 读一个 range 滑块的当前值，元素缺失或值异常时回落到给定默认。 */
+function readSlider(id: string, fallback: number): number {
+  const element = document.getElementById(id) as HTMLInputElement | null;
+  const value = Number(element?.value);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+/** 拖动 blur / brightness 时的实时预览：两个滑块共用同一条 filter。 */
+function previewBackgroundFilter(): void {
+  const blur = readSlider('bgBlur', 0);
+  const brightness = readSlider('bgBrightness', 100);
+  document.documentElement.style.setProperty('--bg-filter', backgroundFilterValue(blur, brightness));
+  document.documentElement.style.setProperty('--bg-transform', blur > 0 ? 'scale(1.06)' : 'none');
+}
+
 function bindBackgroundSlider(id: 'bgDim' | 'bgBlur' | 'bgOpacity' | 'bgBrightness', labelId: string, unit: string): void {
   const input = $<HTMLInputElement>(id);
   input.oninput = () => {
     const value = Number(input.value);
     $(labelId).textContent = `${value}${unit}`;
     if (id === 'bgDim') $('bgDimLayer').style.opacity = String(value / 100);
-    else if (id === 'bgBlur') document.documentElement.style.setProperty('--bg-blur', `${value}px`);
-    else if (id === 'bgBrightness') document.documentElement.style.setProperty('--bg-brightness', String(value / 100));
+    else if (id === 'bgBlur' || id === 'bgBrightness') previewBackgroundFilter();
     else {
       const fade = value / 100;
       document.documentElement.style.setProperty('--bg-fade', String(fade));
