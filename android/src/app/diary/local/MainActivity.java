@@ -19,6 +19,7 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.security.MessageDigest;
 import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Date;
@@ -161,6 +162,7 @@ public final class MainActivity extends Activity {
     return "未知天气";
   }
   private static String encode(String value) throws IOException { return URLEncoder.encode(value, "UTF-8"); }
+  private static String sha256(byte[] bytes) throws Exception { StringBuilder out = new StringBuilder(); for (byte value : MessageDigest.getInstance("SHA-256").digest(bytes)) out.append(String.format(Locale.US, "%02x", value & 255)); return out.toString(); }
   /** Network access lives in the host; the page itself is locked down with connect-src 'none'. */
   private static String http(String method, String target, String body, String contentType, String bearer) throws IOException {
     HttpURLConnection connection = (HttpURLConnection) new URL(target).openConnection();
@@ -237,7 +239,7 @@ public final class MainActivity extends Activity {
               if (!target.isFile() || !target.delete()) throw new IOException("Cannot delete entry");
               break;
             }
-            case "info": result = new JSONObject().put("platform", "Android").put("location", vault.getAbsolutePath()).put("version", "0.1.7"); break;
+            case "info": result = new JSONObject().put("platform", "Android").put("location", vault.getAbsolutePath()).put("version", "0.1.8"); break;
             case "import": case "export": {
               final byte[] payload = op.equals("export") ? read(file(request.getString("id"))).getBytes(StandardCharsets.UTF_8) : null;
               final String name = request.optString("id", "diary") + ".md";
@@ -317,8 +319,16 @@ public final class MainActivity extends Activity {
             case "sources:list": {
               File folder = new File(vault, "school-sources"); JSONArray sources = new JSONArray();
               File[] files = folder.listFiles((dir, name) -> name.matches("[a-f0-9-]{36}\\.json"));
-              if (files != null) for (File item : files) { JSONObject source = new JSONObject(read(item)); source.remove("data"); sources.put(source); }
+              if (files != null) for (File item : files) { JSONObject source = new JSONObject(read(item)); boolean migrated = !source.has("extension"); if (migrated) { String name=source.optString("name",""); String extension=name.contains(".")?name.substring(name.lastIndexOf('.')+1).toLowerCase(Locale.US):"txt"; byte[] bytes=Base64.decode(source.optString("data",""),Base64.DEFAULT); source.put("extension",extension).put("size",bytes.length).put("schoolId","").put("schoolName","").put("checksum",sha256(bytes)).put("parseStatus","ready").put("analysis",new JSONObject().put("status","not_requested").put("summary","").put("topics",new JSONArray()).put("keywords",new JSONArray()).put("updatedAt",JSONObject.NULL)); writeJsonAtomic(item,source.toString()); } source.remove("data"); sources.put(source); }
               result = sources; break;
+            }
+            case "sources:update": {
+              String sourceId = request.getString("id");
+              if (!sourceId.matches("[a-f0-9-]{36}")) throw new IOException("Invalid source id");
+              File target = new File(new File(vault, "school-sources"), sourceId + ".json");
+              JSONObject current = new JSONObject(read(target)); JSONObject patch = request.getJSONObject("source");
+              for (String key : new String[] { "department", "schoolId", "schoolName", "analysis" }) if (patch.has(key)) current.put(key, patch.get(key));
+              writeJsonAtomic(target, current.toString()); current.remove("data"); result = current; break;
             }
             case "sources:delete": {
               String sourceId = request.getString("id");

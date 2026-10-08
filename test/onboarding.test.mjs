@@ -23,7 +23,7 @@ test('first use is one continuous full tutorial and does not start a second roun
   assert.ok(modules.indexOf('pets') > modules.indexOf('vpn'));
   const restored = await engineFor('new');
   assert.equal(restored.state.status, 'completed');
-  assert.equal(restored.state.version, 5);
+  assert.equal(restored.state.version, 6);
 });
 
 test('a v0.1.4-complete user sees only VPN then pets once', async () => {
@@ -39,7 +39,7 @@ test('a v0.1.4-complete user sees only VPN then pets once', async () => {
   assert.equal(restored.state.status, 'completed');
 });
 
-test('v0.1.5 and v0.1.6 users see only the new campus competition module once', async () => {
+test('v0.1.5 and v0.1.6 users see the later added modules once', async () => {
   for (const status of ['completed', 'dismissed']) {
     for (const version of [3,4]) {
       globalThis.localStorage = storage();
@@ -50,6 +50,16 @@ test('v0.1.5 and v0.1.6 users see only the new campus competition module once', 
       engine.next(); assert.equal(engine.step.id, 'complete'); engine.next(); assert.equal(engine.state.status, 'completed');
     }
   }
+});
+
+test('a completed 0.1.7 user sees only the new document module once', async () => {
+  globalThis.localStorage=storage();
+  localStorage.setItem('diary.onboarding.v5.v017',JSON.stringify({version:5,status:'completed',currentStep:37}));
+  const engine=await engineFor('v017');
+  assert.equal(engine.state.status,'active');assert.equal(engine.step.id,'documents-intro');
+  const seen=[];while(engine.state.status==='active'){seen.push(engine.step.module);engine.next();}
+  assert.ok(seen.length>=6);assert.ok(seen.every(module=>module==='documents'));
+  assert.equal((await engineFor('v017')).state.status,'completed');
 });
 
 test('unfinished progress is migrated and restored at a reasonable operation', async () => {
@@ -81,5 +91,8 @@ test('VPN, pet and campus competition tutorial steps target current controls', a
   assert.deepEqual(vpn.map(step => step.target), ['#vpnButton', '.vpn-toolbar', '#vpnList', '.vpn-add', '.vpn-import-actions']);
   assert.deepEqual(pets.map(step => step.target), ['#petButton', '#petList', '#petToggle', '.pet-import', '.petdex-footer']);
   assert.equal(tutorialSteps.find(step=>step.module==='campus-competition')?.target,'#campusCompetitionOpen');
-  assert.ok(tutorialSteps.every(step => !/0\.1\.[0-6]/.test(`${step.title} ${step.body}`)));
+  const documents=tutorialSteps.filter(step=>step.module==='documents');
+  assert.equal(tutorialSteps[4]?.id,'documents-intro');
+  assert.deepEqual(documents.map(step=>step.target),['.school-source-library','#schoolImport','#schoolSourceList','.source-library-tools','#portalPrompt','#schoolEvidence']);
+  assert.ok(tutorialSteps.every(step => !/0\.1\.[0-7]/.test(`${step.title} ${step.body}`)));
 });

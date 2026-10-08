@@ -9,7 +9,7 @@ import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { MarkdownEngine } from '../storage/markdown-engine.ts';
 import { SchoolDirectory } from '../host/school-directory.ts';
 import { fetchCampusCompetitions } from '../host/campus-info.ts';
-import { saveSource, listSources, deleteSource } from '../host/sources.ts';
+import { saveSource, listSources, deleteSource, updateSource } from '../host/sources.ts';
 import type { SchoolSource } from '../app/sources.ts';
 import type { Request } from '../app/api.ts';
 import { HostConfig, DEFAULT_PROVIDER_IDS, type BackgroundState, type ChromeState, type LocationState, type PermissionState } from '../host/config.ts';
@@ -324,6 +324,7 @@ else {
         }
         case 'sources:save': return saveSource(vault, source as SchoolSource & {data:string});
         case 'sources:list': return listSources(vault);
+        case 'sources:update': return updateSource(vault,id!,source as Parameters<typeof updateSource>[2]);
         case 'sources:delete': await deleteSource(vault,id!);return{ok:true};
         case 'list': return (await engine.listEntries()).map(entry => {
           const security = config.entrySecurityInfo(entry.id);

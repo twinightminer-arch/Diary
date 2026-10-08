@@ -14,21 +14,25 @@ export class TutorialEngine extends EventTarget {
   /** A deliberate sidebar launch always replays the complete current tutorial. */
   restart(): void { this.progress = { version: TUTORIAL_VERSION, status: 'active', currentStep: 0 }; this.commit(); }
   next(): void {
-    if (this.progress.currentStep >= tutorialSteps.length - 1) this.progress = { ...this.progress, status: 'completed' };
+    const nextStep=tutorialSteps[this.progress.currentStep+1];
+    if (this.progress.incrementalOnly && this.step.module === 'documents' && nextStep?.module !== 'documents') this.progress = { ...this.progress, status: 'completed' };
+    else if (this.progress.currentStep >= tutorialSteps.length - 1) this.progress = { ...this.progress, status: 'completed' };
     else this.progress = { ...this.progress, currentStep: this.progress.currentStep + 1 };
     this.commit();
   }
   back(): void { this.progress = { ...this.progress, currentStep: Math.max(0, this.progress.currentStep - 1) }; this.commit(); }
   skipModule(): void {
     const module = this.step.module;
+    if(this.progress.incrementalOnly){this.progress={...this.progress,status:'completed'};this.commit();return;}
     const next = tutorialSteps.findIndex((step, index) => index > this.progress.currentStep && step.module !== module);
     this.progress = next < 0 ? { ...this.progress, status: 'completed' } : { ...this.progress, currentStep: next };
     this.commit();
   }
   skipAll(): void { this.progress = { ...this.progress, status: 'dismissed' }; this.commit(); }
   private key(): string { return `diary.onboarding.v${TUTORIAL_VERSION}.${this.userId}`; }
-  private migrate(old: TutorialProgress, oldVersion: 2 | 3 | 4): TutorialProgress {
+  private migrate(old: TutorialProgress, oldVersion: 2 | 3 | 4 | 5): TutorialProgress {
     const terminal = old.status === 'completed' || old.status === 'dismissed';
+    if(oldVersion===5&&terminal){const firstNew=tutorialSteps.findIndex(step=>step.module==='documents');return{version:TUTORIAL_VERSION,status:'active',currentStep:Math.max(0,firstNew),incrementalOnly:true};}
     if ((oldVersion === 3 || oldVersion === 4) && terminal) {
       const firstNew = tutorialSteps.findIndex(step => step.module === 'campus-competition');
       return { version: TUTORIAL_VERSION, status: 'active', currentStep: Math.max(0, firstNew) };
@@ -44,8 +48,9 @@ export class TutorialEngine extends EventTarget {
       'welcome','privacy-first','accounts','navigation','home','tutorial-entry','new-diary','save-preview','diary-catalog','diary-menu','diary-import','diary-security','diary-tools','batch','ai-model','ai-chat','ai-search','competition','guide','guide-local','wallpaper','music-media','profile','plugins','theme-lock','vpn-find','vpn-open-import','pet-select','pet-import','petdex','complete',
     ];
     const v4Ids = ['welcome','privacy-first','accounts','navigation','home','tutorial-entry','new-diary','save-preview','diary-catalog','diary-menu','diary-import','diary-security','diary-tools','batch','ai-model','ai-chat','ai-search','competition','guide','guide-local','wallpaper','music-media','profile','plugins','theme-lock','vpn-entry','vpn-find','vpn-open','vpn-add','vpn-batch','pet-entry','pet-preview','pet-select','pet-import','petdex','complete'];
+    const v5Ids = [...v4Ids.slice(0,-1),'campus-competition-entry','complete'];
     const v2Ids = ['welcome','privacy-first','accounts','navigation','home','tutorial-entry','new-diary','save-preview','diary-catalog','diary-menu','diary-import','diary-security','diary-tools','batch','ai-model','ai-chat','ai-search','competition','guide','guide-local','wallpaper','music-media','profile','plugins','theme-lock','complete'];
-    const oldId = oldVersion === 4 ? v4Ids[old.currentStep] : oldVersion === 3 ? v3Ids[old.currentStep] : v2Ids[old.currentStep];
+    const oldId = oldVersion === 5 ? v5Ids[old.currentStep] : oldVersion === 4 ? v4Ids[old.currentStep] : oldVersion === 3 ? v3Ids[old.currentStep] : v2Ids[old.currentStep];
     const mapped = oldId ? tutorialSteps.findIndex(step => step.id === oldId) : -1;
     // The former combined VPN import step now begins at the first still unseen
     // VPN operation, so interrupted users do not lose tutorial coverage.
@@ -58,6 +63,8 @@ export class TutorialEngine extends EventTarget {
     try {
       const value = JSON.parse(localStorage.getItem(this.key()) ?? 'null') as TutorialProgress | null;
       if (value?.version === TUTORIAL_VERSION && Number.isInteger(value.currentStep)) return value;
+      const v5 = JSON.parse(localStorage.getItem(`diary.onboarding.v5.${this.userId}`) ?? 'null') as TutorialProgress | null;
+      if (v5?.version === 5 && Number.isInteger(v5.currentStep)) return this.migrate(v5, 5);
       const v4 = JSON.parse(localStorage.getItem(`diary.onboarding.v4.${this.userId}`) ?? 'null') as TutorialProgress | null;
       if (v4?.version === 4 && Number.isInteger(v4.currentStep)) return this.migrate(v4, 4);
       const v3 = JSON.parse(localStorage.getItem(`diary.onboarding.v3.${this.userId}`) ?? 'null') as TutorialProgress | null;

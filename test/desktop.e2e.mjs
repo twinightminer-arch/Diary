@@ -4,6 +4,12 @@ import { _electron as electron, expect } from '@playwright/test';
 import { resolve, join } from 'node:path';
 import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { launchBrowserHost } from './browser-host.mjs';
+import { zipSync, strToU8 } from 'fflate';
+
+function samplePdf() {
+  const stream='BT /F1 18 Tf 40 80 Td (School PDF) Tj ET\n';const objects=['1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n','2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n','3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n','4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n',`5 0 obj\n<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}endstream\nendobj\n`];let pdf='%PDF-1.4\n',offsets=[0];for(const object of objects){offsets.push(Buffer.byteLength(pdf));pdf+=object;}const xref=Buffer.byteLength(pdf);pdf+=`xref\n0 ${objects.length+1}\n0000000000 65535 f \n${offsets.slice(1).map(value=>String(value).padStart(10,'0')+' 00000 n ').join('\n')}\ntrailer\n<< /Size ${objects.length+1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;return [...Buffer.from(pdf)];
+}
+function sampleDocx(){return [...zipSync({'word/document.xml':strToU8('<?xml version="1.0"?><w:document xmlns:w="x"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>学籍规定</w:t></w:r></w:p><w:p><w:r><w:t>缓考需要提交证明。</w:t></w:r></w:p></w:body></w:document>')})];}
 
 test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron'}: CRUD, restart persistence, encryption, preview and languages`, { timeout: 180000 }, async () => {
   await mkdir('work/ui-tests', { recursive: true });
@@ -43,10 +49,19 @@ test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron
     await expect(page.locator('#tutorialSkipAll')).toBeVisible();
     await page.locator('#tutorialSkipAll').click();
     await expect(page.locator('.tutorial-layer')).toBeHidden();
+    const parsed=await page.evaluate(async ({pdf,docx})=>{const module=await import('./app/sources.js');const pdfSections=await module.extractSource('sample.pdf',new Uint8Array(pdf)),docxSections=await module.extractSource('sample.docx',new Uint8Array(docx));let damaged='';try{await module.extractSource('damaged.pdf',new Uint8Array([37,80,68,70,45,49]));}catch(error){damaged=String(error);}return{pdf:pdfSections.map(item=>item.text).join(' '),docx:docxSections.map(item=>item.text).join(' '),damaged};},{pdf:samplePdf(),docx:sampleDocx()});
+    assert.match(parsed.pdf,/School PDF/);assert.match(parsed.docx,/缓考需要提交证明/);assert.ok(parsed.damaged);
     // Manual replay starts the complete guide, while module skipping reaches
     // the newly integrated VPN and pet steps without spawning a second guide.
     await page.locator('#tutorialButton').click();
-    await expect(page.locator('#tutorialTitle')).toContainText('Diary 0.1.7');
+    await expect(page.locator('#tutorialTitle')).toContainText('Diary 0.1.8');
+    await page.locator('#tutorialSkipModule').click();
+    await page.locator('#tutorialSkipModule').click();
+    await expect(page.locator('#tutorialModule')).toHaveText('内置文件存储消化问答');
+    await expect(page.locator('.school-source-library')).toHaveClass(/tutorial-target/);
+    for (const selector of ['#schoolImport','#schoolSourceList','.source-library-tools','#portalPrompt','#schoolEvidence']) {
+      await page.locator('#tutorialNext').click(); await expect(page.locator(selector)).toHaveClass(/tutorial-target/);
+    }
     for (let i = 0; i < 6; i++) await page.locator('#tutorialSkipModule').click();
     await expect(page.locator('#tutorialModule')).toHaveText('学校 VPN');
     await expect(page.locator('#vpnButton')).toHaveClass(/tutorial-target/);
@@ -73,6 +88,15 @@ test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron
     await page.locator('#petButton').click();
     await expect(page.locator('.pet-card')).toContainText('Diary 小爪');
     await expect(page.locator('#petdexLink')).toHaveAttribute('href', 'https://petdex.dev/zh');
+    const sourceId='12345678-1234-1234-1234-123456789abc',sourceText='缓考申请需要在考试前向教务处提交证明材料。';
+    await page.evaluate(async ({sourceId,sourceText})=>{const bytes=new TextEncoder().encode(sourceText),data=btoa(String.fromCharCode(...bytes)),checksum=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes))).map(v=>v.toString(16).padStart(2,'0')).join('');await window.diary.call({op:'sources:save',source:{id:sourceId,name:'学生规定.txt',extension:'txt',size:bytes.length,department:'教务处',schoolId:'demo',schoolName:'示例大学',importedAt:new Date().toISOString(),checksum,parseStatus:'ready',analysis:{status:'not_requested',summary:'',topics:[],keywords:[],updatedAt:null},sections:[{label:'正文',text:sourceText}],data}});},{sourceId,sourceText});
+    await page.locator('#primaryNav [data-view="chat"]').click();
+    await expect(page.locator('.school-source-row')).toContainText('学生规定.txt');
+    await page.locator('#schoolSourceSearch').fill('示例大学'); await expect(page.locator('.school-source-row')).toHaveCount(1);
+    await page.locator('#schoolSourceFilter').selectOption('pdf'); await expect(page.locator('.school-source-row')).toHaveCount(0);
+    await page.locator('#schoolSourceFilter').selectOption('txt'); await page.locator('#schoolSourceSearch').fill('');
+    await page.locator('.source-scope').check(); await page.locator('#portalPrompt').fill('缓考需要什么材料？'); await page.locator('#portalSend').click();
+    await expect(page.locator('#portalConversation .bubble-citations')).toContainText('学生规定.txt',{timeout:30000});
     await page.locator('[data-view="diary"]').first().click();
     await expect(page.locator('#firstEntry')).toBeVisible();
     await page.locator('#firstEntry').click();

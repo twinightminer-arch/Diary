@@ -1,14 +1,20 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { TutorialStep } from './types.ts';
 
-export const TUTORIAL_VERSION = 5;
-export const moduleNames = { welcome: '开始使用', workspace: '工作台', diary: '日记', ai: 'AI 工具', campus: '校园服务', 'campus-competition': '查找校园竞赛', personalize: '个性化与安全', vpn: '学校 VPN', pets: '桌面宠物' } as const;
+export const TUTORIAL_VERSION = 6;
+export const moduleNames = { welcome: '开始使用', workspace: '工作台', documents: '内置文件存储消化问答', diary: '日记', ai: 'AI 工具', campus: '校园服务', 'campus-competition': '查找校园竞赛', personalize: '个性化与安全', vpn: '学校 VPN', pets: '桌面宠物' } as const;
 
 export const tutorialSteps: readonly TutorialStep[] = [
-  { id: 'welcome', module: 'welcome', title: '欢迎使用 Diary 0.1.7', body: '这是本机优先的大学生工作台。接下来会连续介绍首页、日记、AI、校园服务、学校 VPN、桌面宠物与校园竞赛查询，全部结束后统一完成；引导不会替你执行删除、提交或联网操作。' },
+  { id: 'welcome', module: 'welcome', title: '欢迎使用 Diary 0.1.8', body: '这是本机优先的大学生工作台。接下来会连续介绍文件消化问答、首页、日记、AI、校园服务、学校 VPN、桌面宠物与校园竞赛查询，全部结束后统一完成；引导不会替你执行删除、提交或联网操作。' },
   { id: 'privacy-first', module: 'welcome', title: '数据默认留在本机', body: '日记、账户和媒体默认保存在当前设备。联网和定位默认关闭，重要日记请定期导出备份。', target: '.offline-pill' },
   { id: 'accounts', module: 'welcome', title: '本地账户与 Google 登录', body: '本地账户可完全离线使用；Google 登录会创建或绑定本地账户，但不会把日记同步到云端。账户密保用于找回账户密码。', target: '.user-mini' },
   { id: 'navigation', module: 'workspace', title: '主要功能都在左侧', body: '首页、AI 问答、AI 搜索、竞赛中心、办事指南和日记可以从这里切换。', target: '#primaryNav', view: 'home' },
+  { id: 'documents-intro', module: 'documents', title: '内置文件存储消化问答', body: '导入学校文档后，Diary 会先在本机安全解析、建立索引并保存；你可以选择是否让 AI 分析摘录，随后随时提问并查看回答引用的文件位置。', target: '.school-source-library', view: 'chat' },
+  { id: 'documents-import', module: 'documents', title: '导入学校文档', body: '填写学校和发布部门，再导入 PDF、DOCX 或 TXT。损坏、空白、加密、过大或不支持的文件会被明确拒绝。', target: '#schoolImport', view: 'chat' },
+  { id: 'documents-status', module: 'documents', title: '查看解析与 AI 分析状态', body: '资料列表显示类型、大小、解析状态、AI 分析状态和校验值。点击文件查看摘要、主题、关键词与分段预览；点击 AI 可在确认发送范围后分析。', target: '#schoolSourceList', view: 'chat' },
+  { id: 'documents-manage', module: 'documents', title: '搜索、筛选与删除资料', body: '按文件名、学校、部门或摘要搜索，并按格式筛选。删除会同时移除文件索引和分析结果，且始终先要求确认。', target: '.source-library-tools', view: 'chat', warning: '删除用户导入资料不可撤销。' },
+  { id: 'documents-ask', module: 'documents', title: '选择文件并随时提问', body: '勾选一个或多个文件可限定问答范围；不勾选时搜索全部资料。没有可靠依据时 Diary 会明确说明，不会编造文件内容。', target: '#portalPrompt', view: 'chat' },
+  { id: 'documents-citations', module: 'documents', title: '核对回答引用', body: '回答下方和右侧“回答依据”会列出文件名及页码、章节或分段位置。问题、回答与引用记录保存在本机，重新打开后仍可查看。', target: '#schoolEvidence', view: 'chat' },
   { id: 'home', module: 'workspace', title: '首页与快捷入口', body: '首页汇总天气、通知、最近操作和常用入口。天气需要你主动开启联网与定位许可。', target: '#homeView', view: 'home' },
   { id: 'tutorial-entry', module: 'workspace', title: '随时重新打开教程', body: '侧栏中的“新手教程”按钮会重新启动完整引导；每次都可以跳过当前模块或跳过全部。', target: '#tutorialButton' },
   { id: 'new-diary', module: 'diary', title: '新建并书写日记', body: '进入日记后点击“新建日记”，填写标题和正文。正文支持常用 Markdown。', target: '#newEntry', view: 'diary' },
