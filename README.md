@@ -25,19 +25,18 @@ flowchart TB
   V011 --> WB[v0.1.1-wb-bridge<br/>WorkBuddy 本机 AI 桥接<br/>插件管理、天气首页、壁纸与隐私开关重构]
   WB --> V012[v0.1.2<br/>壁纸仅铺工作区、完整适配<br/>字体/字号/顶栏颜色、动态壁纸防卡顿]
 
-  V012 --> DEV013[0.1.3 开发阶段<br/>壁纸控制、日记菜单、目录密码与双密保]
-  DEV013 --> A[支线 A<br/>AI 接口内置搜索与资料来源]
-  DEV013 --> B[支线 B<br/>竞赛中心报名官网与准确错误状态]
-  DEV013 --> C[支线 C<br/>AI 搜索历史恢复]
-  DEV013 --> D[教程/壁纸/日记主支线<br/>新手引导与核心交互修复]
+  V012 --> MAIN013[主支线 0.1.3 开发阶段<br/>壁纸控制、日记菜单、目录密码与双密保]
+  V012 --> A[v0.1.3-A · 支线 A<br/>AI 接口内置搜索与资料来源<br/>未上传二进制]
+  V012 --> B[v0.1.3-B · 支线 B<br/>竞赛中心报名官网与准确错误状态<br/>未上传二进制]
+  V012 --> C[v0.1.3-C · 支线 C<br/>AI 搜索历史恢复<br/>未上传二进制]
 
-  A --> V014[v0.1.4<br/>在稳定基线重建首次使用教程<br/>支持跳过、恢复与侧栏重播]
-  B --> V014
-  C --> V014
-  D --> V014
+  MAIN013 --> V014[v0.1.4 · 主支线<br/>在稳定基线重建首次使用教程<br/>支持跳过、恢复与侧栏重播]
   V014 --> V015[v0.1.5<br/>学校 VPN 搜索与 CSV/JSON 导入<br/>PetDex v2 桌面宠物管理]
   V015 --> V016[v0.1.6<br/>首次使用改为单次连续教程<br/>旧用户仅接收新增模块引导]
-  V016 --> V017[v0.1.7<br/>整合四支线：统一学校目录与迁移<br/>校园竞赛获取、全局语言、网络安全边界]
+  V016 --> V017[v0.1.7 · 四线集成点<br/>统一学校目录与迁移<br/>校园竞赛获取、全局语言、网络安全边界]
+  A --> V017
+  B --> V017
+  C --> V017
   V017 --> V018[v0.1.8<br/>PDF/DOCX/TXT 学校文档导入<br/>本地解析、可选 AI 分析、范围问答与引用]
   V018 --> V019[v0.1.9<br/>Android 登录、链接与至少 8 位密码流程稳定<br/>Windows 安全外链、便携版与 Setup 补充发布]
 
@@ -51,7 +50,7 @@ flowchart TB
   class ROOT root;
   class LEGACY,V020,V021,V022 legacy;
   class REBUILD,V010,V011,WB,V012,V014,V015,V016,V017,V018 rebuild;
-  class DEV013,A,B,C,D branch;
+  class MAIN013,A,B,C branch;
   class V019,NOW current;
 ```
 
@@ -60,7 +59,8 @@ flowchart TB
 - **设计根基**：本地优先 Markdown、宿主能力桥接和跨端兼容格式；部分 TypeScript 模块设计参考 Logseq，许可与来源见 [UPSTREAM.md](UPSTREAM.md) 和 [LICENSE.md](LICENSE.md)。
 - **旧版原型线**：`v0.2.0 → v0.2.1 → v0.2.2` 验证了 AI、媒体、加密、账户、跨端和校园办事能力。
 - **重制主线**：从 `v0.1.0` 重新编号，逐步完成一办通界面、登录、插件、壁纸、日记安全、新手教程、学校 VPN、桌宠、统一学校数据、校园竞赛、全局语言和学校文档问答。
-- **支线集成**：AI 内置搜索、竞赛中心、搜索历史以及壁纸/日记/教程四个方向最终汇入重制主线；图中只按远端确有的提交与功能归纳，不把未发布实验当成正式版本。
+- **支线版本**：`v0.1.3-A`、`v0.1.3-B`、`v0.1.3-C` 均有远端分支与标签，但没有对应 GitHub Release 二进制；主支线则独立产生 `v0.1.4 → v0.1.5 → v0.1.6`。
+- **四线集成**：主支线、AI 内置搜索、竞赛中心和搜索历史四个方向直到 `v0.1.7` 才完成产品层面的集成，并非在 `v0.1.4` 汇合。提交历史还出现过一次 `0.1.3-D` 临时版本标记，但它没有独立远端分支、正式标签或二进制，因此只作为历史记录，不画成正式发布线。
 - **当前版本**：`v0.1.9` 同时提供 Windows 便携版、Windows Setup 和 Android APK；下载及逐版本说明见 [GitHub Releases](https://github.com/twinightminer-arch/Diary/releases)，完整提交可在 [Commits](https://github.com/twinightminer-arch/Diary/commits) 与 [Branches](https://github.com/twinightminer-arch/Diary/branches) 核验。
 
 ## 桌面与 Android 应用
