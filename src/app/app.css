@@ -357,6 +357,10 @@ body.has-bg .view-heading,body.has-bg .section-head,body.has-bg .result-meta,bod
 .route-text strong{display:block;font-size:calc(11.5px * var(--chrome-font-scale,1))}
 .route-text small{color:var(--muted);font-size:calc(10px * var(--chrome-font-scale,1))}
 .ai-actions{display:flex;align-items:center;gap:11px;flex-wrap:wrap;margin-top:4px}
+.ai-model-panel [data-ai-panel="api"]{display:grid;gap:11px}
+.ai-model-panel [data-ai-panel="api"][hidden]{display:none}
+.ai-model-panel [data-ai-panel="api"] .hint{overflow-wrap:anywhere}
+.ai-model-panel [data-ai-panel="api"] .hint a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}
 .ai-status{font-size:calc(11.5px * var(--chrome-font-scale,1));line-height:1.6}
 .ai-status.pending{color:var(--muted)}
 .ai-status.ok{color:#1f8a6d}
@@ -506,3 +510,15 @@ body.dark .wallpaper-card em{color:#e0b155}
 .bg-library .wallpaper-card{position:relative}
 .bg-library .wallpaper-card.active{outline:2px solid #2f6bff;outline-offset:1px}
 .media-gallery-title{margin:14px 0 6px;font-size:calc(12px * var(--chrome-font-scale,1));color:var(--muted);font-weight:600}
+.school-source-library { border-top: 1px solid #dfe3e8; margin-top: 16px; padding-top: 16px; }
+.school-source-library h3 { font-size: 15px; margin: 0 0 12px; }
+.school-department { display: grid; gap: 5px; font-size: 12px; color: #4b5563; margin-bottom: 10px; }
+.school-department input { width: 100%; box-sizing: border-box; border: 1px solid #cbd2d9; border-radius: 6px; padding: 8px; background: #fff; color: #17212b; }
+.school-source-library > button { width: 100%; min-height: 36px; }
+.school-source-library > small { display: block; margin: 8px 0; color: #596579; }
+.school-source-row { display: flex; align-items: center; gap: 6px; padding: 9px 0; border-bottom: 1px solid #e7eaee; min-width: 0; }
+.school-source-row > div { min-width: 0; flex: 1; }
+.school-source-row strong, .school-source-row small { display: block; overflow-wrap: anywhere; }
+.school-source-row strong { font-size: 12px; }
+.school-source-row small { color: #697586; font-size: 11px; margin-top: 3px; }
+.source-icon-button { border: 0; background: transparent; color: #506178; font-size: 19px; width: 28px; height: 30px; flex: 0 0 28px; cursor: pointer; }

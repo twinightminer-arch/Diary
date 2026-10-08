@@ -5,6 +5,8 @@ import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
+import android.database.Cursor;
+import android.provider.OpenableColumns;
 import android.os.Bundle;
 import android.util.AtomicFile;
 import android.util.Base64;
@@ -32,7 +34,7 @@ public final class MainActivity extends Activity {
   private File media;
   private int documentRequest = -1;
   private byte[] exportData;
-  private static final int IMPORT = 101, EXPORT = 102;
+  private static final int IMPORT = 101, EXPORT = 102, SOURCE_IMPORT = 103;
   private static final String ORIGIN = "https://appassets.androidplatform.net";
   // Google OAuth redirect: reverse-DNS scheme derived from the Android client ID.
   private static final String GOOGLE_SCHEME = "com.googleusercontent.apps.933958043196-8otpn6ub49h2oo2agrdjocljl5p3559g";
@@ -68,9 +70,9 @@ public final class MainActivity extends Activity {
         Uri uri = request.getUrl();
         String path = uri.getPath();
         if ("https".equals(uri.getScheme()) && "appassets.androidplatform.net".equals(uri.getHost()) &&
-            path != null && path.matches("/(index\\.html|app\\.css|(?:app|i18n|security|storage)/[a-z-]+\\.js)")) {
+            path != null && path.matches("/(index\\.html|app\\.css|(?:app|i18n|security|storage)/[a-z-]+\\.js|vendor/(?:pdf(?:\\.worker)?\\.mjs|fflate\\.js))")) {
           try {
-            String mime = path.endsWith(".js") ? "application/javascript" : path.endsWith(".css") ? "text/css" : "text/html";
+            String mime = path.endsWith(".js") || path.endsWith(".mjs") ? "application/javascript" : path.endsWith(".css") ? "text/css" : "text/html";
             return new WebResourceResponse(mime, "UTF-8", getAssets().open(path.substring(1)));
           } catch (IOException ignored) { }
         }
@@ -199,6 +201,22 @@ public final class MainActivity extends Activity {
     }
     return output.toString("UTF-8");
   }
+  private static byte[] readSourceBytes(InputStream input) throws IOException {
+    if (input == null) throw new IOException("Cannot read file");
+    ByteArrayOutputStream output = new ByteArrayOutputStream(); byte[] buffer = new byte[8192]; int count;
+    while ((count = input.read(buffer)) != -1) {
+      if (output.size() + count > 20 * 1024 * 1024) throw new IOException("文件超过 20 MB");
+      output.write(buffer, 0, count);
+    }
+    if (output.size() == 0) throw new IOException("文件为空");
+    return output.toByteArray();
+  }
+  private File sourceFile(String id) throws IOException {
+    if (!id.matches("[a-f0-9-]{36}")) throw new IOException("Invalid source id");
+    File directory = new File(getFilesDir(), "school-sources");
+    if (!directory.isDirectory() && !directory.mkdirs()) throw new IOException("Cannot create source directory");
+    return new File(directory, id + ".json");
+  }
   private void write(File target, String content, boolean create) throws IOException {
     if (content.getBytes(StandardCharsets.UTF_8).length > 10_000_000) throw new IOException("File exceeds 10 MB");
     if (create ? !target.createNewFile() : !target.isFile()) throw new IOException(create ? "Entry already exists" : "Entry not found");
@@ -250,6 +268,50 @@ public final class MainActivity extends Activity {
                 } catch (Exception error) { documentRequest = -1; exportData = null; reply(id, null, error); }
               });
               return;
+            }
+            case "sources:pick": {
+              runOnUiThread(() -> {
+                try {
+                  if (documentRequest != -1) throw new IOException("File picker is already open");
+                  documentRequest = id;
+                  Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                  intent.addCategory(Intent.CATEGORY_OPENABLE); intent.setType("*/*");
+                  intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] { "application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain" });
+                  startActivityForResult(intent, SOURCE_IMPORT);
+                } catch (Exception error) { documentRequest = -1; reply(id, null, error); }
+              });
+              return;
+            }
+            case "sources:save": {
+              JSONObject source = request.getJSONObject("source");
+              File target = sourceFile(source.getString("id"));
+              String name = source.getString("name");
+              JSONArray sections = source.getJSONArray("sections");
+              byte[] bytes = Base64.decode(source.getString("data"), Base64.DEFAULT);
+              if (!name.matches("(?i).+\\.(pdf|docx|txt)") || name.length() > 255 ||
+                  source.getString("department").length() > 120 || sections.length() == 0 ||
+                  bytes.length == 0 || bytes.length > 20 * 1024 * 1024) throw new IOException("Invalid school source");
+              for (int i = 0; i < sections.length(); i++)
+                if (sections.getJSONObject(i).getString("text").trim().isEmpty()) throw new IOException("Empty source section");
+              AtomicFile atomic = new AtomicFile(target); FileOutputStream output = null;
+              try { output = atomic.startWrite(); output.write(source.toString().getBytes(StandardCharsets.UTF_8)); atomic.finishWrite(output); }
+              catch (IOException error) { if (output != null) atomic.failWrite(output); throw error; }
+              source.remove("data"); result = source; break;
+            }
+            case "sources:list": {
+              File directory = new File(getFilesDir(), "school-sources");
+              File[] files = directory.listFiles((dir, name) -> name.matches("[a-f0-9-]{36}\\.json"));
+              JSONArray list = new JSONArray();
+              if (files != null) for (File item : files) {
+                if (item.length() > 40L * 1024 * 1024) throw new IOException("Source record too large");
+                JSONObject source = new JSONObject(Files.readString(item.toPath())); source.remove("data"); list.put(source);
+              }
+              result = list; break;
+            }
+            case "sources:delete": {
+              File target = sourceFile(request.getString("id"));
+              if (!target.isFile() || !target.delete()) throw new IOException("Cannot delete source");
+              result = new JSONObject().put("ok", true); break;
             }
             // Media: illustrations, backgrounds, music and avatars.
             case "media:import": {
@@ -381,14 +443,22 @@ public final class MainActivity extends Activity {
   }
   @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
     super.onActivityResult(requestCode, resultCode, data);
-    if (requestCode != IMPORT && requestCode != EXPORT) return;
+    if (requestCode != IMPORT && requestCode != EXPORT && requestCode != SOURCE_IMPORT) return;
     final int id = documentRequest; final byte[] payload = exportData; documentRequest = -1; exportData = null;
     if (id == -1) return;
     if (resultCode != RESULT_OK || data == null || data.getData() == null) { reply(id, requestCode == EXPORT ? false : null, null); return; }
     Uri uri = data.getData();
     io.execute(() -> {
       try {
-        if (requestCode == IMPORT) {
+        if (requestCode == SOURCE_IMPORT) {
+          String name = "source";
+          try (Cursor cursor = getContentResolver().query(uri, new String[] { OpenableColumns.DISPLAY_NAME }, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) name = cursor.getString(0);
+          }
+          try (InputStream input = getContentResolver().openInputStream(uri)) {
+            reply(id, new JSONObject().put("name", name).put("data", Base64.encodeToString(readSourceBytes(input), Base64.NO_WRAP)), null);
+          }
+        } else if (requestCode == IMPORT) {
           try (InputStream input = getContentResolver().openInputStream(uri)) { reply(id, readText(input), null); }
         } else {
           try (OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {

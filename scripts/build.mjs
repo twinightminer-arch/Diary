@@ -34,6 +34,10 @@ async function compile(directory) {
 await compile('src');
 await copyFile('src/app/index.html', 'dist/web/index.html');
 await copyFile('src/app/app.css', 'dist/web/app.css');
+await mkdir('dist/web/vendor', { recursive: true });
+await copyFile('node_modules/pdfjs-dist/build/pdf.min.mjs', 'dist/web/vendor/pdf.mjs');
+await copyFile('node_modules/pdfjs-dist/build/pdf.worker.min.mjs', 'dist/web/vendor/pdf.worker.mjs');
+await copyFile('node_modules/fflate/esm/browser.js', 'dist/web/vendor/fflate.js');
 await cp('assets', 'dist/assets', { recursive: true });
 await sourceArchive();
 console.log('Built desktop and Android web assets.');

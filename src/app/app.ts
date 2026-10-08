@@ -463,12 +463,12 @@ document.querySelectorAll<HTMLButtonElement>('[data-login-provider]').forEach(bu
 
 // ---------- AI 模型（侧边栏独立入口，三页：API / 自定义 / WorkBuddy 插件） ----------
 /** Built-in OpenAI-compatible vendors. Matches DEFAULT_PROVIDERS on the host. */
-const VENDOR_PRESETS: { id: string; label: string; baseUrl: string; model: string }[] = [
-  { id: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
-  { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
-  { id: 'moonshot', label: 'Moonshot（月之暗面）', baseUrl: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k' },
-  { id: 'zhipu', label: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash' },
-  { id: 'siliconflow', label: '硅基流动 SiliconFlow', baseUrl: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct' },
+const VENDOR_PRESETS: { id: string; label: string; baseUrl: string; model: string; keyUrl?: string }[] = [
+  { id: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat', keyUrl: 'https://platform.deepseek.com/api_keys' },
+  { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini', keyUrl: 'https://platform.openai.com/api-keys' },
+  { id: 'moonshot', label: 'Moonshot（月之暗面）', baseUrl: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k', keyUrl: 'https://platform.moonshot.cn/console/api-keys' },
+  { id: 'zhipu', label: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', model: 'glm-4-flash', keyUrl: 'https://open.bigmodel.cn/usercenter/proj-mgmt/apikeys' },
+  { id: 'siliconflow', label: '硅基流动 SiliconFlow', baseUrl: 'https://api.siliconflow.cn/v1', model: 'Qwen/Qwen2.5-7B-Instruct', keyUrl: 'https://cloud.siliconflow.cn/account/ak' },
   { id: 'local', label: '本机自建网关', baseUrl: 'http://127.0.0.1:3000/v1', model: 'deepseek-v4-flash' },
 ];
 
@@ -485,12 +485,31 @@ function paintApiPage(cfg: Snapshot): void {
     option.textContent = preset.label;
     sel.append(option);
   }
-  const current = cfg.providers.find(p => p.id === sel.value) ?? cfg.providers[0];
   const paint = () => {
     const entry = cfg.providers.find(p => p.id === sel.value);
+    const preset = VENDOR_PRESETS.find(p => p.id === sel.value)!;
     $<HTMLInputElement>('aiApiBase').value = entry?.baseUrl ?? '';
     $<HTMLInputElement>('aiApiModel').value = entry?.model ?? '';
     $<HTMLInputElement>('aiApiKey').value = '';
+    $('aiVendorGuide').textContent = preset.id === 'local'
+      ? '请先启动本机网关，并确认它提供 OpenAI 兼容的聊天接口。'
+      : `使用 ${preset.label} 的 API 服务；模型 ID 必须是该账户可用的模型。`;
+    const guide = $('aiKeyGuide');
+    guide.replaceChildren();
+    if (preset.keyUrl) {
+      const keyUrl = preset.keyUrl;
+      const link = Object.assign(document.createElement('a'), {
+        href: keyUrl, target: '_blank', rel: 'noopener noreferrer', textContent: `${preset.label} 控制台`,
+      });
+      link.onclick = event => {
+        event.preventDefault();
+        void call({ op: 'openExternal', url: keyUrl }).catch(error => toast(localizedError(error)));
+      };
+      guide.append('还没有密钥？前往 ', link, ' 创建 API Key。');
+    } else guide.textContent = '填写本机网关要求的密钥；当前连接器需要密钥才能发起请求。';
+    guide.append(entry?.hasKey ? ' 已保存密钥，留空可继续使用。' : ' 尚未保存密钥。');
+    $('aiApiTestResult').textContent = '';
+    $('aiApiTestResult').className = 'ai-status';
   };
   sel.value = VENDOR_PRESETS.some(p => p.id === cfg.activeProvider) ? cfg.activeProvider : VENDOR_PRESETS[0]!.id;
   sel.onchange = paint;
@@ -1219,21 +1238,57 @@ async function runProbe(outId: string): Promise<void> {
   const out = $(outId);
   out.className = 'ai-status pending';
   out.textContent = '正在测试，请稍候…';
-  const result = await call<{ ok: boolean; ms: number; provider: string; model: string; detail: string }>({ op: 'agent:probe' });
-  out.className = `ai-status ${result.ok ? 'ok' : 'bad'}`;
-  out.textContent = result.ok
-    ? `✓ ${result.provider} · ${result.model} · ${result.ms} ms · 回复「${result.detail}」`
-    : `✗ ${result.provider} · ${result.model}：${result.detail}`;
+  try {
+    const result = await call<{ ok: boolean; ms: number; provider: string; model: string; detail: string }>({ op: 'agent:probe' });
+    out.className = `ai-status ${result.ok ? 'ok' : 'bad'}`;
+    out.textContent = result.ok
+      ? `连接成功：${result.provider} · ${result.model} · ${result.ms} ms`
+      : `连接失败：${probeAdvice(result.detail)}`;
+  } catch (error) {
+    out.className = 'ai-status bad';
+    out.textContent = `连接失败：${probeAdvice(localizedError(error))}`;
+  }
 }
-$('aiApiSave').onclick = action(async () => {
+
+function probeAdvice(detail: string): string {
+  if (/未配置.*API Key|API key is required/i.test(detail)) return '请填写 API 密钥后重新保存。';
+  if (/\b(401|403)\b|unauthorized|invalid.*(api.?key|token)|authentication/i.test(detail)) return 'API 密钥无效或没有权限，请到服务商控制台检查密钥。';
+  if (/\b404\b|model.*not found|model.*does not exist/i.test(detail)) return '服务地址或模型 ID 不正确，请对照服务商控制台检查。';
+  if (/\b429\b|quota|rate limit|insufficient/i.test(detail)) return '请求额度不足或触发限流，请检查账户额度后重试。';
+  if (/fetch failed|network|timeout|timed out|abort|ECONN|ENOTFOUND/i.test(detail)) return '无法连接服务商，请检查网络、代理和服务地址后重试。';
+  return detail;
+}
+
+async function saveApiProvider(): Promise<boolean> {
   const id = $<HTMLSelectElement>('aiVendor').value;
-  const key = $<HTMLInputElement>('aiApiKey').value;
-  await call({ op: 'config:setProvider', id, baseUrl: $<HTMLInputElement>('aiApiBase').value, model: $<HTMLInputElement>('aiApiModel').value, ...(key ? { next: key } : {}) });
+  const baseInput = $<HTMLInputElement>('aiApiBase');
+  const modelInput = $<HTMLInputElement>('aiApiModel');
+  const keyInput = $<HTMLInputElement>('aiApiKey');
+  const baseUrl = baseInput.value.trim();
+  const model = modelInput.value.trim();
+  const key = keyInput.value.trim();
+  const previous = lastSnapshot?.providers.find(p => p.id === id);
+  const out = $('aiApiTestResult');
+  const fail = (message: string, field: HTMLInputElement) => {
+    out.className = 'ai-status bad'; out.textContent = message; field.focus(); return false;
+  };
+  if (!baseUrl) return fail('请填写服务地址。', baseInput);
+  if (!/^https?:\/\//i.test(baseUrl)) return fail('服务地址必须以 http:// 或 https:// 开头。', baseInput);
+  if (!model) return fail('请填写模型 ID。', modelInput);
+  if (!key && !previous?.hasKey) return fail('请先填写 API 密钥。', keyInput);
+  await call({ op: 'config:setProvider', id, baseUrl, model, ...(key ? { next: key } : {}) });
   await loadConfig();
   await openAiModels();
+  return true;
+}
+$('aiApiSave').onclick = action(async () => {
+  if (!await saveApiProvider()) return;
   toast('已保存并启用');
 });
-$('aiApiTest').onclick = action(async () => { await runProbe('aiApiTestResult'); });
+$('aiApiTest').onclick = action(async () => {
+  if (!await saveApiProvider()) return;
+  await runProbe('aiApiTestResult');
+});
 $('aiCustomAdd').onclick = action(async () => {
   const id = $<HTMLInputElement>('aiCustomName').value.trim();
   if (!id) { toast('请先填写名称'); return; }

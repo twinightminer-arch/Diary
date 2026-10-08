@@ -97,13 +97,17 @@
   </nav>
   <div class="settings-body">
     <div data-ai-panel="api">
-      <p class="hint">用各家官方的 OpenAI 兼容接口：选一家，填它的服务地址、模型名和密钥。密钥用本机设备密钥加密后保存，不会明文落到磁盘。</p>
+      <p class="hint">首次配置：选择服务商 → 在其官网创建 API 密钥 → 确认模型 → 保存并测试。服务地址已预填，通常无需修改。</p>
       <label class="field"><span>服务商</span><select id="aiVendor"></select></label>
+      <p class="hint" id="aiVendorGuide"></p>
       <label class="field"><span>服务地址</span><input id="aiApiBase" placeholder="https://api.deepseek.com/v1"></label>
-      <label class="field"><span>模型</span><input id="aiApiModel" placeholder="deepseek-chat"><datalist id="aiApiModelList"></datalist></label>
-      <label class="field"><span>API 密钥</span><input id="aiApiKey" type="password" placeholder="留空表示沿用已保存的密钥"></label>
+      <p class="hint">仅当服务商提供了不同的 OpenAI 兼容地址时才修改；不要填网页控制台地址。</p>
+      <label class="field"><span>模型 ID</span><input id="aiApiModel" placeholder="deepseek-chat"></label>
+      <p class="hint">已预填常用模型。也可填写你在服务商控制台开通的模型 ID。</p>
+      <label class="field"><span>API 密钥</span><input id="aiApiKey" type="password" autocomplete="off" placeholder="填写服务商控制台生成的 API Key"></label>
+      <p class="hint" id="aiKeyGuide"></p>
       <button id="aiApiSave" class="primary">保存并启用</button>
-      <div class="ai-actions"><button id="aiApiTest" type="button" class="outline-button">测试连接</button><span id="aiApiTestResult" class="ai-status"></span></div>
+      <div class="ai-actions"><button id="aiApiTest" type="button" class="outline-button">保存并测试连接</button><span id="aiApiTestResult" class="ai-status" role="status" aria-live="polite"></span></div>
       <p class="hint" id="aiApiState"></p>
     </div>
     <div data-ai-panel="custom" hidden>

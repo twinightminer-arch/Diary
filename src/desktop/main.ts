@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createServer } from 'node:http';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { MarkdownEngine } from '../storage/markdown-engine.ts';
+import { saveSource, listSources, deleteSource } from '../host/sources.ts';
 import type { Request } from '../app/api.ts';
 import { HostConfig, DEFAULT_PROVIDER_IDS, type BackgroundState, type ChromeState, type LocationState, type PermissionState } from '../host/config.ts';
 import { loadPlugins, providerNeedsKey, type ProviderPlugin } from '../host/plugins.ts';
@@ -322,6 +323,16 @@ else {
           if (source.length > 10_000_000) throw new Error('File exceeds 10 MB');
           return source;
         }
+        case 'sources:pick': {
+          const result = await dialog.showOpenDialog(win, { properties: ['openFile'], filters: [{ name: '校方资料', extensions: ['pdf', 'docx', 'txt'] }] });
+          if (result.canceled || !result.filePaths[0]) return null;
+          const bytes = await readFile(result.filePaths[0]);
+          if (!bytes.length || bytes.length > 20 * 1024 * 1024) throw new Error('文件须在 1 B 至 20 MB 之间');
+          return { name: result.filePaths[0].split(/[\\/]/).pop(), data: bytes.toString('base64') };
+        }
+        case 'sources:save': return saveSource(vault, request.source!);
+        case 'sources:list': return listSources(vault);
+        case 'sources:delete': await deleteSource(vault, id!); return { ok: true };
         case 'export': {
           const entries = await engine.listEntries();
           if (!entries.some(entry => entry.id === id)) throw new Error('Entry not found');

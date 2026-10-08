@@ -3,6 +3,7 @@ import { changePasscode, decryptBatch, decryptContent, encryptBatch, encryptCont
 import { parseMarkdown, serializeMarkdown } from '../storage/markdown.ts';
 import type { MarkdownDocument } from '../storage/markdown.ts';
 import type { Entry, EntrySummary } from '../storage/markdown-engine.ts';
+import type { SchoolSource } from './sources.ts';
 
 export type Request = {
   op: string; id?: string; document?: MarkdownDocument; passcode?: string; next?: string; confirmation?: string; content?: string;
@@ -25,6 +26,7 @@ export type Request = {
   /** Plugin manager + permission switches. */
   pluginId?: string; enabled?: boolean; network?: boolean; location?: boolean;
   mode?: string; label?: string;
+  source?: SchoolSource & { data: string };
 };
 declare global {
   interface Window {
