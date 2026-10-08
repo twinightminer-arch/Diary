@@ -56,7 +56,7 @@ flowchart TB
 
 ### 历程说明与远端依据
 
-- **设计根基**：本地优先 Markdown、宿主能力桥接和跨端兼容格式；部分 TypeScript 模块设计参考 Logseq，许可与来源见 [UPSTREAM.md](UPSTREAM.md) 和 [LICENSE.md](LICENSE.md)。
+- **设计根基**：本地优先 Markdown、宿主能力桥接和跨端兼容格式；部分 TypeScript 模块设计参考 Logseq，许可与来源见 [UPSTREAM.md](UPSTREAM.md) 和 [LICENSE.md](LICENSE.md) 另外，背景音乐部分参照了MinerCraft  PCL启动器源代码；壁纸插件借鉴了DSHL壁纸插件的设计思路。
 - **旧版原型线**：`v0.2.0 → v0.2.1 → v0.2.2` 验证了 AI、媒体、加密、账户、跨端和校园办事能力。
 - **重制主线**：从 `v0.1.0` 重新编号，逐步完成一办通界面、登录、插件、壁纸、日记安全、新手教程、学校 VPN、桌宠、统一学校数据、校园竞赛、全局语言和学校文档问答。
 - **支线版本**：`v0.1.3-A`、`v0.1.3-B`、`v0.1.3-C` 均有远端分支与标签，但没有对应 GitHub Release 二进制；主支线则独立产生 `v0.1.4 → v0.1.5 → v0.1.6`。
