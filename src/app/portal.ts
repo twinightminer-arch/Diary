@@ -84,18 +84,20 @@ export function setPortalPlugins(disabled: readonly string[]): void { disabledPl
 export function isPortalPluginEnabled(id: string): boolean { return !disabledPlugins.has(id); }
 
 type RecentKind = 'chat' | 'search-view';
-type RecentRecord = { text: string; kind: RecentKind; at: number };
+type RecentRecord = { text: string; kind: RecentKind; at: number; answer?: string; sources?: string[] };
 const RECENT_KEY = 'diary.portal.recent';
 
 function recentRecords(): RecentRecord[] {
   try {
     const value = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]') as unknown;
-    return Array.isArray(value) ? (value as RecentRecord[]).slice(0, 8) : [];
+    return Array.isArray(value) ? value.filter((item): item is RecentRecord =>
+      item !== null && typeof item === 'object' && typeof item.text === 'string'
+      && (item.kind === 'chat' || item.kind === 'search-view') && typeof item.at === 'number').slice(0, 8) : [];
   } catch { return []; }
 }
-function recordRecent(text: string, kind: RecentKind): void {
-  const items = recentRecords().filter(item => item.text !== text);
-  items.unshift({ text, kind, at: Date.now() });
+function recordRecent(text: string, kind: RecentKind, answer?: string, sources?: string[]): void {
+  const items = recentRecords().filter(item => item.text !== text || item.kind !== kind);
+  items.unshift({ text, kind, at: Date.now(), ...(answer === undefined ? {} : { answer, sources: sources ?? [] }) });
   localStorage.setItem(RECENT_KEY, JSON.stringify(items.slice(0, 8)));
 }
 function relativeTime(at: number): string {
@@ -327,7 +329,14 @@ function recentPanel(): HTMLElement {
     for (const record of records.slice(0, 4)) {
       const button = h('button', 'recent-item');
       button.dataset.view = record.kind;
-      if (record.kind === 'chat') button.dataset.prompt = record.text;
+      button.dataset.prompt = record.text;
+      if (record.kind === 'search-view') button.onclick = () => {
+        searchState = {
+          query: record.text,
+          text: typeof record.answer === 'string' ? record.answer : '旧记录未保存回答和来源。点击搜索重新获取。',
+          sources: Array.isArray(record.sources) ? record.sources.filter(source => typeof source === 'string') : [],
+        };
+      };
       button.append(frag(
         `<span class="recent-symbol ${record.kind === 'chat' ? 'blue' : 'purple'}">${record.kind === 'chat' ? '◇' : '⌕'}</span>`
         + `<span class="recent-text"><strong>${esc(record.text)}</strong>`
@@ -656,14 +665,27 @@ function searchPrefs(): SearchPrefs {
   catch { return { official: true, verified: true, chinese: true }; }
 }
 function saveSearchPrefs(prefs: SearchPrefs): void { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); }
-let searchState: { query: string; text: string } | null = null;
+let searchState: { query: string; text: string; sources: string[] } | null = null;
+
+function answerSources(answer: string): string[] {
+  const lines = answer.split('\n').map(line => line.trim()).filter(line => /^(?:\d+[.)]\s*)?(?:来源|参考来源|参考资料|出处)[：:]/.test(line));
+  const urls = (answer.match(/https?:\/\/[^\s<>()\[\]，。；、]+/g) ?? [])
+    .map(url => url.replace(/[.,;:!?]+$/, ''))
+    .filter(url => !lines.some(line => line.includes(url)));
+  return [...new Set([...lines, ...urls])].slice(0, 8);
+}
 
 function paintSearchResult(): void {
   const host = node('portalSearchResult');
   if (!host) return;
   host.replaceChildren();
+  const sourceHost = node('portalSearchSources');
+  const sourceCount = node('portalSearchSourceCount');
+  sourceHost?.replaceChildren();
   if (!searchState) {
     host.append(frag('<h2>搜索结果将在这里显示</h2><p>输入问题后点击搜索，我会检索公开来源并给出带依据的结论。</p>'));
+    if (sourceCount) sourceCount.textContent = '—';
+    sourceHost?.append(h('p', 'source-hint', '搜索完成后，这里会显示回答中提供的来源。'));
     return;
   }
   host.append(h('h2', '', searchState.query));
@@ -671,12 +693,15 @@ function paintSearchResult(): void {
     const text = paragraph.trim();
     if (text) host.append(h('p', '', text));
   }
+  if (sourceCount) sourceCount.textContent = String(searchState.sources.length);
+  if (!searchState.sources.length) sourceHost?.append(h('p', 'source-hint', '此回答未提供可核验的来源。'));
+  for (const source of searchState.sources) sourceHost?.append(h('p', 'search-source', source));
 }
 async function runSearch(query: string): Promise<void> {
   const prompt = query.trim();
   if (!prompt) { toast('请输入要查询的内容'); return; }
   const prefs = searchPrefs();
-  searchState = { query: prompt, text: '正在检索并核验来源…' };
+  searchState = { query: prompt, text: '正在检索并核验来源…', sources: [] };
   paintSearchResult();
   try {
     const instruction = [
@@ -685,11 +710,14 @@ async function runSearch(query: string): Promise<void> {
       `请联网检索并核验以下问题：${prompt}`,
     ].filter(Boolean).join('\n');
     const text = await call<string>({ op: 'agent:compose', messages: [{ role: 'user', content: instruction }], task: 'compose' });
-    searchState = { query: prompt, text: text.trim() || '（模型返回了空内容）' };
-    recordRecent(prompt, 'search-view');
+    const answer = text.trim() || '（模型返回了空内容）';
+    const sources = answerSources(answer);
+    searchState = { query: prompt, text: answer, sources };
+    recordRecent(prompt, 'search-view', answer, sources);
   } catch (error) {
     const local = offlineAnswer(prompt);
-    searchState = { query: prompt, text: local ?? `检索失败：${failureMessage(error)}` };
+    searchState = { query: prompt, text: local ?? `检索失败：${failureMessage(error)}`, sources: [] };
+    if (local) recordRecent(prompt, 'search-view', local, []);
   }
   paintSearchResult();
 }
@@ -714,8 +742,8 @@ function renderSearch(prefill = ''): HTMLElement {
     <div class="search-result-layout">
       <article class="answer-card" id="portalSearchResult"></article>
       <aside class="result-sources">
-        <div class="panel-head"><div><h3>来源</h3><span>按可信度排序</span></div><span class="source-count">—</span></div>
-        <p class="source-hint">配置 AI 服务后，这里会列出本次回答实际使用的来源与核验时间。</p>
+        <div class="panel-head"><div><h3>来源</h3></div><span class="source-count" id="portalSearchSourceCount">—</span></div>
+        <div id="portalSearchSources"></div>
       </aside>
     </div>
   `));
