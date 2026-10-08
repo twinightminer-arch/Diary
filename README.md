@@ -1,8 +1,71 @@
-# Diary 重制版 0.1.1
+# Diary 重制版 0.1.9
+
+## 设计与更新全历程
+
+> 以下历程依据仓库远端提交、标签、开发分支和 GitHub Releases 整理（更新于 2026-10-09）。版本号较大的旧版 `0.2.x` 早于重制版 `0.1.x`；重制后版本从 `0.1.0` 重新开始。
+
+```mermaid
+flowchart TB
+  ROOT([Diary：本地优先的跨平台日记与校园助手])
+
+  ROOT --> ORIGIN[源代码与设计起点]
+  ORIGIN --> O1[参考 Logseq TypeScript 模块设计]
+  ORIGIN --> O2[AGPL-3.0-only 开源许可]
+  ORIGIN --> O3[本地 Markdown · 宿主桥接 · Windows 与 Android 共用格式]
+  O3 --> INIT[2026-10-03<br/>仓库初始化 eee84eb]
+
+  INIT --> LEGACY[旧版原型线 0.2.x]
+  LEGACY --> V020[v0.2.0<br/>AI 日记助手、媒体库、天气与地点查询<br/>AES-GCM 加密、账户、Windows 与 Android]
+  V020 --> V021[v0.2.1<br/>加入校园办事模式<br/>事项识别、自动填表、材料与流程追踪]
+  V021 --> V022[v0.2.2<br/>修复 Android 白屏与资源路径<br/>恢复截图、沿用发布签名]
+
+  V022 --> REBUILD[2026-10-06<br/>重制线从 0.1.0 重新编号]
+  REBUILD --> V010[v0.1.0<br/>融合“一办通”视觉与完整日记<br/>移除测试身份和旧案件式办事入口<br/>本地账户、统一图标、修复页面切换]
+  V010 --> V011[v0.1.1<br/>Google OAuth PKCE<br/>移除硬编码密钥、桌面与 Android 登录分流]
+  V011 --> WB[v0.1.1-wb-bridge<br/>WorkBuddy 本机 AI 桥接<br/>插件管理、天气首页、壁纸与隐私开关重构]
+  WB --> V012[v0.1.2<br/>壁纸仅铺工作区、完整适配<br/>字体/字号/顶栏颜色、动态壁纸防卡顿]
+
+  V012 --> DEV013[0.1.3 开发阶段<br/>壁纸控制、日记菜单、目录密码与双密保]
+  DEV013 --> A[支线 A<br/>AI 接口内置搜索与资料来源]
+  DEV013 --> B[支线 B<br/>竞赛中心报名官网与准确错误状态]
+  DEV013 --> C[支线 C<br/>AI 搜索历史恢复]
+  DEV013 --> D[教程/壁纸/日记主支线<br/>新手引导与核心交互修复]
+
+  A --> V014[v0.1.4<br/>在稳定基线重建首次使用教程<br/>支持跳过、恢复与侧栏重播]
+  B --> V014
+  C --> V014
+  D --> V014
+  V014 --> V015[v0.1.5<br/>学校 VPN 搜索与 CSV/JSON 导入<br/>PetDex v2 桌面宠物管理]
+  V015 --> V016[v0.1.6<br/>首次使用改为单次连续教程<br/>旧用户仅接收新增模块引导]
+  V016 --> V017[v0.1.7<br/>整合四支线：统一学校目录与迁移<br/>校园竞赛获取、全局语言、网络安全边界]
+  V017 --> V018[v0.1.8<br/>PDF/DOCX/TXT 学校文档导入<br/>本地解析、可选 AI 分析、范围问答与引用]
+  V018 --> V019[v0.1.9<br/>Android 登录、链接与至少 8 位密码流程稳定<br/>Windows 安全外链、便携版与 Setup 补充发布]
+
+  V019 --> NOW([当前设计<br/>Electron Windows + 原生 WebView Android<br/>本地优先 · 可迁移 · 可验证 · 跨模块校园数据])
+
+  classDef root fill:#155eef,color:#fff,stroke:#0b3fa8,stroke-width:2px;
+  classDef legacy fill:#fff3d6,color:#5b3a00,stroke:#d89b22;
+  classDef rebuild fill:#eaf8f1,color:#124b33,stroke:#36a269;
+  classDef branch fill:#f0edff,color:#352273,stroke:#7761d8;
+  classDef current fill:#e8f3ff,color:#123d67,stroke:#2684d9,stroke-width:2px;
+  class ROOT root;
+  class LEGACY,V020,V021,V022 legacy;
+  class REBUILD,V010,V011,WB,V012,V014,V015,V016,V017,V018 rebuild;
+  class DEV013,A,B,C,D branch;
+  class V019,NOW current;
+```
+
+### 历程说明与远端依据
+
+- **设计根基**：本地优先 Markdown、宿主能力桥接和跨端兼容格式；部分 TypeScript 模块设计参考 Logseq，许可与来源见 [UPSTREAM.md](UPSTREAM.md) 和 [LICENSE.md](LICENSE.md)。
+- **旧版原型线**：`v0.2.0 → v0.2.1 → v0.2.2` 验证了 AI、媒体、加密、账户、跨端和校园办事能力。
+- **重制主线**：从 `v0.1.0` 重新编号，逐步完成一办通界面、登录、插件、壁纸、日记安全、新手教程、学校 VPN、桌宠、统一学校数据、校园竞赛、全局语言和学校文档问答。
+- **支线集成**：AI 内置搜索、竞赛中心、搜索历史以及壁纸/日记/教程四个方向最终汇入重制主线；图中只按远端确有的提交与功能归纳，不把未发布实验当成正式版本。
+- **当前版本**：`v0.1.9` 同时提供 Windows 便携版、Windows Setup 和 Android APK；下载及逐版本说明见 [GitHub Releases](https://github.com/twinightminer-arch/Diary/releases)，完整提交可在 [Commits](https://github.com/twinightminer-arch/Diary/commits) 与 [Branches](https://github.com/twinightminer-arch/Diary/branches) 核验。
 
 ## 桌面与 Android 应用
 
-现已提供 Windows 桌面界面和 Android 原生 WebView 外壳。重制版 0.1.1 采用“一办通”视觉体系重构应用，统一首页、AI 问答、AI 搜索、竞赛中心、办事指南和完整日记功能，并移除旧版校园办事案件模式。
+现已提供 Windows 桌面界面和 Android 原生 WebView 外壳。重制线采用“一办通”视觉体系统一首页、AI 问答、AI 搜索、竞赛中心、办事指南和完整日记功能；当前发布版本为 0.1.9。
 
 日记模式继续支持新建、编辑、搜索、删除、Markdown 预览、单篇与批量加密、导入导出、五种语言和深浅主题。
 
