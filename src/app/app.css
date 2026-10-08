@@ -118,7 +118,7 @@ body.has-bg .view-heading,body.has-bg .section-head,body.has-bg .result-meta,bod
    frame and soften the picture, which is exactly what "降画质" means. The only
    zoom left is tied to the blur slider, where the frame has to overhang to keep
    the blurred edge from showing a seam. */
-.bg-layer{position:fixed;top:0;bottom:0;left:var(--sidebar-w);right:0;z-index:-3;pointer-events:none;object-fit:cover;background-repeat:no-repeat;background-position:center;background-size:cover;filter:var(--bg-filter,none);transform:var(--bg-transform,none);opacity:calc(1 - var(--bg-fade,0))}
+.bg-layer{position:fixed;top:0;bottom:0;left:var(--sidebar-w);right:0;width:calc(100vw - var(--sidebar-w));height:100vh;max-width:none;max-height:none;z-index:-3;pointer-events:none;object-fit:cover;object-position:center;background-repeat:no-repeat;background-position:center;background-size:cover;filter:var(--bg-filter,none);transform:var(--bg-transform,none);opacity:calc(1 - var(--bg-fade,0))}
 .bg-dim{position:fixed;top:0;bottom:0;left:var(--sidebar-w);right:0;z-index:-2;pointer-events:none;background:#000;opacity:0;transition:opacity .2s}
 .bg-veil{position:fixed;top:0;bottom:0;left:var(--sidebar-w);right:0;z-index:-1;pointer-events:none;background:#f6f8fc;opacity:0;transition:opacity .2s}
 /* Readability controls must override the diary editor's explicit theme colors.
@@ -501,6 +501,9 @@ body.dark .wallpaper-card em{color:#e0b155}
 /* ===== right-click menu ===== */
 .context-menu{position:fixed;z-index:90;min-width:186px;padding:5px;border-radius:11px;background:var(--field);border:1px solid var(--line);box-shadow:0 18px 44px #101a3129;display:flex;flex-direction:column;gap:2px}
 .context-menu button{text-align:left;padding:9px 12px;font-size:calc(12.5px * var(--chrome-font-scale,1));border-radius:8px;width:100%}
+.diary-catalog-toggle{width:100%;padding:0;display:flex;align-items:center;justify-content:space-between;color:inherit;letter-spacing:inherit;font-size:inherit}
+.diary-catalog-toggle:hover{background:transparent;color:#fff}.catalog-arrow{font-size:16px;line-height:1}
+.modal-extras{display:flex;gap:5px;margin-right:auto}.modal-extras button{padding:7px 4px;color:var(--accent);font-size:12px}.modal-actions{align-items:center}
 
 /* ===== diary mode: imported weather system ===== */
 .web-manual{margin-top:9px}

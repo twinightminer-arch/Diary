@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { app, BrowserWindow, dialog, ipcMain, net, protocol, session, shell } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, net, protocol, session, shell } from 'electron';
 import { join, resolve } from 'node:path';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { appendFileSync } from 'node:fs';
@@ -301,17 +301,54 @@ else {
         codeChallenge, code, codeVerifier, baseUrl, model, url,
         kind, folder, fit, dim, blur, opacity, brightness, path, title, animated, file,
         pluginId, enabled, network, location, mode, label,
-        fontCustom, fontColor, fontSize, topbarColor,
+        fontCustom, fontColor, fontSize, topbarColor, question, answer, question2, answer2,
       } = request;
       switch (op) {
-        case 'list': return engine.listEntries();
+        case 'list': return (await engine.listEntries()).map(entry => {
+          const security = config.entrySecurityInfo(entry.id);
+          return { ...entry, ...(security ? { title: security.title, hasRecovery: true } : {}) };
+        });
         case 'read': return engine.readEntry(id!, passcode);
         case 'create': return engine.createEntry(id!, document!, passcode);
-        case 'update': return engine.updateEntry(id!, document!, passcode);
-        case 'delete': return engine.deleteEntry(id!, passcode);
+        case 'update': {
+          const result = await engine.updateEntry(id!, document!, passcode);
+          config.updateEntrySecurityTitle(id!, String(result.metadata.title ?? '无标题日记'));
+          await config.save(); return result;
+        }
+        case 'delete': {
+          const result = await engine.deleteEntry(id!, passcode);
+          config.deleteEntrySecurity(id!); await config.save(); return result;
+        }
         case 'encrypt': return engine.encryptEntry(id!, passcode!, confirmation!);
-        case 'decrypt': return engine.decryptEntry(id!, passcode!);
-        case 'changePasscode': return engine.changeEntryPasscode(id!, passcode!, next!, confirmation!);
+        case 'decrypt': {
+          const result = await engine.decryptEntry(id!, passcode!);
+          config.deleteEntrySecurity(id!); await config.save(); return result;
+        }
+        case 'changePasscode': {
+          const result = await engine.changeEntryPasscode(id!, passcode!, next!, confirmation!);
+          await config.updateEntrySecurityPasscode(id!, next!); await config.save(); return result;
+        }
+        case 'entry:securityInfo': return config.entrySecurityInfo(id!);
+        case 'entry:setSecurity': {
+          if (!id || !passcode || passcode !== confirmation) throw new Error('密码与确认密码不一致');
+          await config.setEntrySecurity(id, title ?? '无标题日记', passcode, [question ?? '', question2 ?? ''], [answer ?? '', answer2 ?? '']);
+          try { await engine.encryptEntry(id, passcode, confirmation); }
+          catch (error) { config.deleteEntrySecurity(id); throw error; }
+          await config.save(); return { ok: true };
+        }
+        case 'entry:recover': return { passcode: await config.recoverEntryPasscode(id!, [answer ?? '', answer2 ?? '']) };
+        case 'entry:changeSecurity': {
+          const result = await engine.changeEntryPasscode(id!, passcode!, next!, confirmation!);
+          await config.updateEntrySecurityPasscode(id!, next!); await config.save(); return result;
+        }
+        case 'entry:showInFolder': {
+          if (!(await engine.listEntries()).some(entry => entry.id === id)) throw new Error('Entry not found');
+          shell.showItemInFolder(join(vault, `${id}.md`)); return true;
+        }
+        case 'entry:copyPath': {
+          if (!(await engine.listEntries()).some(entry => entry.id === id)) throw new Error('Entry not found');
+          const entryPath = join(vault, `${id}.md`); clipboard.writeText(entryPath); return entryPath;
+        }
         case 'info': return { platform: 'Windows', location: vault, version: app.getVersion() };
         case 'showFolder': return shell.openPath(vault);
         case 'openExternal': await shell.openExternal(String(url)); return { ok: true };

@@ -12,12 +12,14 @@ import type { WeatherOk, WeatherReport } from './weather.ts';
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const title = $<HTMLInputElement>('title'), editor = $<HTMLTextAreaElement>('editor');
 let current: Entry | null = null, password: string | undefined, dirty = false, draft = false, busy = false, busySince = 0;
-let entries: (EntrySummary & { title: string; snippet: string })[] = [];
+type SidebarEntry = EntrySummary & { title: string; snippet: string; hasRecovery?: boolean };
+let entries: SidebarEntry[] = [];
 let toastTimer: ReturnType<typeof setTimeout>;
 let unlocked = true;
 let selected = new Set<string>();
 type Field = { name: string; label: string; type?: string; options?: [string, string][]; required?: boolean };
-function modal(heading: string, message = '', fields: Field[] = []): Promise<Record<string, string> | null> {
+type ModalOptions = { extras?: { label: string; action: string }[] };
+function modal(heading: string, message = '', fields: Field[] = [], options: ModalOptions = {}): Promise<Record<string, string> | null> {
   const dialog = $<HTMLDialogElement>('modal');
   $('modalTitle').textContent = heading; $('modalMessage').textContent = message;
   $('modalFields').replaceChildren(); $('modalError').textContent = '';
@@ -32,11 +34,18 @@ function modal(heading: string, message = '', fields: Field[] = []): Promise<Rec
     }
     label.append(input); $('modalFields').append(label);
   }
+  let extras = $('modalExtras');
+  if (!extras) { extras = document.createElement('span'); extras.id = 'modalExtras'; extras.className = 'modal-extras'; $('modalCancel').before(extras); }
+  extras.replaceChildren();
   dialog.showModal();
   return new Promise(resolve => {
     const finish = (result: Record<string, string> | null) => {
-      dialog.close(); $('modalForm').onsubmit = null; $('modalCancel').onclick = null; dialog.oncancel = null; resolve(result);
+      dialog.close(); $('modalForm').onsubmit = null; $('modalCancel').onclick = null; dialog.oncancel = null; extras.replaceChildren(); resolve(result);
     };
+    for (const extra of options.extras ?? []) {
+      const button = document.createElement('button'); button.type = 'button'; button.textContent = extra.label;
+      button.onclick = () => finish({ __action: extra.action }); extras.append(button);
+    }
     $('modalCancel').onclick = () => finish(null);
     dialog.oncancel = event => { event.preventDefault(); finish(null); };
     $('modalForm').onsubmit = event => {
@@ -87,9 +96,9 @@ function status() {
   $('changePassword').hidden = !current?.encrypted; $('decrypt').hidden = !current?.encrypted;
 }
 async function refresh() {
-  const all = await call<EntrySummary[]>({ op: 'list' });
+  const all = await call<(EntrySummary & { title?: string; hasRecovery?: boolean })[]>({ op: 'list' });
   entries = await Promise.all(all.map(async item => {
-    if (item.encrypted) return { ...item, title: t('encryptedEntry'), snippet: '' };
+    if (item.encrypted) return { ...item, title: item.title || t('encryptedEntry'), snippet: '' };
     const content = await call<Entry>({ op: 'read', id: item.id });
     return { ...item, title: String(content.metadata.title || t('untitled')), snippet: content.body.slice(0, 500) };
   }));
@@ -105,9 +114,11 @@ function renderList() {
     const check = document.createElement('input'); check.type = 'checkbox'; check.className = 'entry-check';
     check.checked = selected.has(entry.id);
     check.onclick = event => { event.stopPropagation(); toggleSelect(entry.id, check.checked); };
-    const heading = document.createElement('span'); heading.className = 'card-title'; heading.textContent = entry.encrypted ? `◇ ${t('encryptedEntry')}` : entry.title;
+    const heading = document.createElement('span'); heading.className = 'card-title'; heading.textContent = `${entry.encrypted ? '🔒 ' : ''}${entry.title}`;
     const date = document.createElement('small'); date.textContent = entry.id.slice(0, 10);
-    button.append(check, heading, date); button.onclick = action(() => selectEntry(entry)); $('entries').append(button);
+    button.append(check, heading, date); button.onclick = action(() => selectEntry(entry));
+    button.oncontextmenu = event => { event.preventDefault(); openEntryContextMenu(event, entry); };
+    $('entries').append(button);
   }
   if (!visible.length) { const empty = document.createElement('p'); empty.className = 'no-entries'; empty.textContent = t(filter ? 'noResults' : 'emptyList'); $('entries').append(empty); }
   $('batchBar').hidden = selected.size === 0;
@@ -125,13 +136,67 @@ function show(entry: Entry, isDraft = false) {
   $('entryDate').textContent = entry.id.slice(0, 10); view(false); status(); renderList();
   document.body.classList.remove('sidebar-open');
 }
-async function selectEntry(entry: EntrySummary) {
+async function recoverAndOpen(entry: SidebarEntry): Promise<void> {
+  const info = await call<{ questions: [string, string] } | null>({ op: 'entry:securityInfo', id: entry.id });
+  if (!info) throw new Error('这篇日记没有设置密保问题');
+  const response = await modal('忘记密码', '请回答创建密码时设置的两个密保问题。', [
+    { name: 'answer', label: info.questions[0], type: 'text' }, { name: 'answer2', label: info.questions[1], type: 'text' },
+  ]);
+  if (!response) return;
+  const recovered = await call<{ passcode: string }>({ op: 'entry:recover', id: entry.id, answer: response.answer!, answer2: response.answer2! });
+  const content = await call<Entry>({ op: 'read', id: entry.id, passcode: recovered.passcode });
+  password = recovered.passcode; show(content);
+}
+async function changeEntrySecurity(entry: SidebarEntry): Promise<void> {
+  const response = await modal('修改密码', '修改密码需要输入原来的旧密码。', [
+    { name: 'passcode', label: '旧密码' }, { name: 'next', label: '新密码' }, { name: 'confirmation', label: '确认新密码' },
+  ]);
+  if (!response) return;
+  await call({ op: 'entry:changeSecurity', id: entry.id, passcode: response.passcode!, next: response.next!, confirmation: response.confirmation! });
+  if (current?.id === entry.id) password = response.next;
+  toast('密码已修改');
+}
+async function setEntrySecurity(entry: SidebarEntry): Promise<void> {
+  const response = await modal('设置密码与密保', '密码至少 8 位；两个密保问题用于忘记密码时验证身份。', [
+    { name: 'next', label: '密码' }, { name: 'confirmation', label: '确认密码' },
+    { name: 'question', label: '密保问题 1', type: 'text' }, { name: 'answer', label: '密保答案 1', type: 'text' },
+    { name: 'question2', label: '密保问题 2', type: 'text' }, { name: 'answer2', label: '密保答案 2', type: 'text' },
+  ]);
+  if (!response) return;
+  await call({ op: 'entry:setSecurity', id: entry.id, title: entry.title, passcode: response.next!, confirmation: response.confirmation!,
+    question: response.question!, answer: response.answer!, question2: response.question2!, answer2: response.answer2! });
+  if (current?.id === entry.id) { password = response.next; current.encrypted = true; status(); }
+  await refresh(); toast('密码与密保已设置');
+}
+function closeEntryContextMenu(): void { document.querySelector('.entry-context-menu')?.remove(); }
+function openEntryContextMenu(event: MouseEvent, entry: SidebarEntry): void {
+  closeEntryContextMenu();
+  const menu = document.createElement('div'); menu.className = 'context-menu entry-context-menu';
+  const add = (label: string, run: () => Promise<unknown>) => {
+    const button = document.createElement('button'); button.textContent = label;
+    button.onclick = action(async () => { closeEntryContextMenu(); await run(); }); menu.append(button);
+  };
+  add(entry.encrypted ? '修改密码' : '设置密码与密保', () => entry.encrypted ? changeEntrySecurity(entry) : setEntrySecurity(entry));
+  add('打开日记文件储存文件夹', () => call({ op: 'entry:showInFolder', id: entry.id }));
+  add('复制日记路径', async () => { await call({ op: 'entry:copyPath', id: entry.id }); toast('日记路径已复制'); });
+  document.body.append(menu);
+  menu.style.left = `${Math.min(event.clientX, innerWidth - menu.offsetWidth - 8)}px`;
+  menu.style.top = `${Math.min(event.clientY, innerHeight - menu.offsetHeight - 8)}px`;
+  setTimeout(() => document.addEventListener('pointerdown', closeEntryContextMenu, { once: true }), 0);
+}
+async function selectEntry(entry: SidebarEntry) {
   if (!unlocked) return;
   if (!await mayDiscard()) return;
   let passcode: string | undefined;
   if (entry.encrypted) {
-    const response = await modal(t('unlock'), t('unlockHint'), [{ name: 'password', label: t('password') }]);
-    if (!response) return; passcode = response.password;
+    const info = await call<{ questions: [string, string] } | null>({ op: 'entry:securityInfo', id: entry.id });
+    const response = await modal(t('unlock'), t('unlockHint'), [{ name: 'password', label: t('password') }], { extras: [
+      ...(info ? [{ label: '忘记密码', action: 'forgot' }] : []), { label: '修改密码', action: 'change' },
+    ] });
+    if (!response) return;
+    if (response.__action === 'forgot') { await recoverAndOpen(entry); return; }
+    if (response.__action === 'change') { await changeEntrySecurity(entry); return; }
+    passcode = response.password;
   }
   const content = await call<Entry>({ op: 'read', id: entry.id, ...(passcode === undefined ? {} : { passcode }) });
   password = passcode; show(content);
@@ -808,6 +873,22 @@ function backgroundFilterValue(blur: number, brightnessPercent: number): string 
  * 纯外观参数（模糊 / 亮度 / 透明度 / 暗角 / 铺法）——只写 CSS 变量和元素样式，
  * 永远不碰 `src`。这是「拖一次滑块就把正在播的视频打回炉」的分界线。
  */
+function applyBackgroundFit(fit: BackgroundState['fit'], image: HTMLElement, video: HTMLVideoElement): void {
+  // A positioned replaced element needs an explicit content box before
+  // object-fit can produce visibly different results on every Chromium build.
+  video.style.width = 'calc(100vw - var(--sidebar-w))';
+  video.style.height = '100vh';
+  video.style.objectFit = fit === 'cover' ? 'cover'
+    : fit === 'fill' ? 'fill'
+      : fit === 'center' || fit === 'tile' ? 'none' : 'contain';
+  video.style.objectPosition = 'center';
+  image.style.backgroundSize = fit === 'contain' ? 'contain'
+    : fit === 'fill' ? '100% 100%'
+      : fit === 'center' || fit === 'tile' ? 'auto' : 'cover';
+  image.style.backgroundRepeat = fit === 'tile' ? 'repeat' : 'no-repeat';
+  image.style.backgroundPosition = 'center';
+}
+
 function paintBackgroundAppearance(bg: BackgroundState, image: HTMLElement, video: HTMLVideoElement): void {
   // 透明度 0 = 原画质：既不动素材本身的透明度，也不盖任何白纱。
   const fade = fadeOf(bg);
@@ -822,16 +903,7 @@ function paintBackgroundAppearance(bg: BackgroundState, image: HTMLElement, vide
   // 直接 `none`，静止图连合成层都不建。
   document.documentElement.style.setProperty('--bg-transform', blur > 0 ? 'scale(1.06)' : 'none');
 
-  const fit = bg.fit ?? 'fill';
-  if (paintedIsVideo) {
-    video.style.objectFit = fit === 'cover' ? 'cover' : fit === 'fill' ? 'fill' : 'contain';
-  } else {
-    image.style.backgroundSize = fit === 'contain' ? 'contain'
-      : fit === 'fill' ? '100% 100%'
-        : fit === 'center' || fit === 'tile' ? 'auto' : 'cover';
-    image.style.backgroundRepeat = fit === 'tile' ? 'repeat' : 'no-repeat';
-    image.style.backgroundPosition = 'center';
-  }
+  applyBackgroundFit(bg.fit ?? 'fill', image, video);
 }
 
 /**
@@ -1514,13 +1586,7 @@ function renderBackgroundLibrary(items: LibraryItem[], active: BackgroundState):
   // disk I/O. Persisting uses the sanitised state returned by the host and
   // updates only the wallpaper, never reloads the video or the whole settings UI.
   fit.oninput = () => {
-    const image = $('bgImage'), video = $<HTMLVideoElement>('bgVideo');
-    const value = fit.value;
-    video.style.objectFit = value === 'cover' ? 'cover' : value === 'fill' ? 'fill' : 'contain';
-    image.style.backgroundSize = value === 'contain' ? 'contain'
-      : value === 'fill' ? '100% 100%'
-        : value === 'center' || value === 'tile' ? 'auto' : 'cover';
-    image.style.backgroundRepeat = value === 'tile' ? 'repeat' : 'no-repeat';
+    applyBackgroundFit(fit.value as BackgroundState['fit'], $('bgImage'), $<HTMLVideoElement>('bgVideo'));
   };
   fit.onchange = action(async () => {
     const background = await call<BackgroundState>({ op: 'background:set', fit: fit.value });
@@ -1885,6 +1951,18 @@ $('batchCancel').onclick = () => { selected.clear(); renderList(); };
 $('newEntry').onclick = action(newEntry); $('firstEntry').onclick = action(newEntry);
 $('save').onclick = action(save);
 $('search').oninput = renderList;
+{
+  const heading = document.querySelector<HTMLElement>('#diarySidebar .list-heading')!;
+  heading.replaceChildren();
+  const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'diary-catalog-toggle';
+  toggle.innerHTML = '<span>日记目录</span><span class="catalog-arrow">⌄</span>'; toggle.setAttribute('aria-expanded', 'true');
+  heading.append(toggle);
+  toggle.onclick = () => {
+    const open = toggle.getAttribute('aria-expanded') === 'true';
+    toggle.setAttribute('aria-expanded', String(!open)); $('entries').hidden = open;
+    toggle.querySelector('.catalog-arrow')!.textContent = open ? '›' : '⌄';
+  };
+}
 title.oninput = editor.oninput = () => { dirty = true; status(); };
 $('editTab').onclick = () => view(false); $('previewTab').onclick = () => view(true);
 $('more').onclick = (event) => {

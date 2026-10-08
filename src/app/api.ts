@@ -13,7 +13,7 @@ export type Request = {
   name?: string; mime?: string; data?: string; background?: string | null; bgm?: string | null;
   avatar?: string | null; username?: string; signature?: string;
   provider?: string; clientId?: string; redirectUri?: string; state?: string; codeChallenge?: string; code?: string; codeVerifier?: string; url?: string;
-  displayName?: string; question?: string; answer?: string; remember?: boolean;
+  displayName?: string; question?: string; answer?: string; question2?: string; answer2?: string; remember?: boolean;
   apiKey?: string;
   /** Background / wallpaper plugin. */
   kind?: string; folder?: string; fit?: string; dim?: number; blur?: number;

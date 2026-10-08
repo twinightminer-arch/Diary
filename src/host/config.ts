@@ -142,6 +142,14 @@ export interface LocationState {
   label: string;
 }
 
+export interface EntrySecurityRecord {
+  title: string;
+  questions: [string, string];
+  /** Answers and the entry passcode are sealed with this installation's device key. */
+  answersSealed: string;
+  passcodeSealed: string;
+}
+
 export interface PersistedConfig {
   version: number;
   activeProvider: string;
@@ -163,6 +171,8 @@ export interface PersistedConfig {
   location: LocationState;
   /** Optional extra folder scanned for Wallpaper Engine projects. */
   wallpaperDir: string | null;
+  /** Recovery material for encrypted diary entries; never contains plaintext answers/passwords. */
+  entrySecurity: Record<string, EntrySecurityRecord>;
 }
 
 // Built-in OpenAI-compatible endpoints. DeepSeek leads because it is reachable
@@ -231,6 +241,7 @@ function defaultConfig(): PersistedConfig {
     permissions: { network: false, location: false },
     location: { mode: 'auto', lat: null, lon: null, label: '' },
     wallpaperDir: null,
+    entrySecurity: {},
   };
 }
 
@@ -322,6 +333,7 @@ function reconcile(raw: Partial<PersistedConfig>): PersistedConfig {
     permissions: { ...base.permissions, ...(raw.permissions ?? {}) },
     location: { ...base.location, ...(raw.location ?? {}) },
     wallpaperDir: typeof raw.wallpaperDir === 'string' && raw.wallpaperDir ? raw.wallpaperDir : null,
+    entrySecurity: raw.entrySecurity && typeof raw.entrySecurity === 'object' ? raw.entrySecurity : {},
   } as PersistedConfig;
 }
 
@@ -381,6 +393,44 @@ export class HostConfig {
     if (!sealed) return null;
     try { return await unseal(sealed, this.#deviceKey); } catch { return null; }
   }
+
+  // ---- Per-entry password recovery ----
+  entrySecurityInfo(id: string): { title: string; questions: [string, string] } | null {
+    const record = this.#data.entrySecurity[id];
+    return record ? { title: record.title, questions: [...record.questions] as [string, string] } : null;
+  }
+  async setEntrySecurity(id: string, title: string, passcode: string, questions: [string, string], answers: [string, string]): Promise<void> {
+    if (!this.#deviceKey) throw new Error('Config not initialized');
+    if (passcode.length < 8) throw new Error('密码至少需要 8 位');
+    const cleanQuestions = questions.map(value => value.trim()) as [string, string];
+    const cleanAnswers = answers.map(value => value.trim().toLocaleLowerCase()) as [string, string];
+    if (cleanQuestions.some(value => value.length < 4) || cleanQuestions[0] === cleanQuestions[1]) throw new Error('请设置两个不同的密保问题（每项至少 4 个字）');
+    if (cleanAnswers.some(value => value.length < 2)) throw new Error('每个密保答案至少 2 个字');
+    this.#data.entrySecurity[id] = {
+      title: title.trim() || '无标题日记', questions: cleanQuestions,
+      answersSealed: await seal(JSON.stringify(cleanAnswers), this.#deviceKey),
+      passcodeSealed: await seal(passcode, this.#deviceKey),
+    };
+  }
+  async recoverEntryPasscode(id: string, answers: [string, string]): Promise<string> {
+    if (!this.#deviceKey) throw new Error('Config not initialized');
+    const record = this.#data.entrySecurity[id];
+    if (!record) throw new Error('这篇日记没有设置密保问题');
+    const expected = JSON.parse(await unseal(record.answersSealed, this.#deviceKey)) as string[];
+    const actual = answers.map(value => value.trim().toLocaleLowerCase());
+    if (expected.length !== 2 || actual.some((value, index) => value !== expected[index])) throw new Error('密保答案不正确');
+    return unseal(record.passcodeSealed, this.#deviceKey);
+  }
+  async updateEntrySecurityPasscode(id: string, passcode: string): Promise<void> {
+    if (!this.#deviceKey) throw new Error('Config not initialized');
+    const record = this.#data.entrySecurity[id];
+    if (record) record.passcodeSealed = await seal(passcode, this.#deviceKey);
+  }
+  updateEntrySecurityTitle(id: string, title: string): void {
+    const record = this.#data.entrySecurity[id];
+    if (record) record.title = title.trim() || record.title;
+  }
+  deleteEntrySecurity(id: string): void { delete this.#data.entrySecurity[id]; }
 
   setProfile(patch: Partial<PersistedConfig['profile']>): void { this.#data.profile = { ...this.#data.profile, ...patch }; }
   get profile(): Readonly<PersistedConfig['profile']> { return this.#data.profile; }

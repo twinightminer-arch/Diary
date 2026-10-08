@@ -38,6 +38,23 @@ test('unknown provider cannot be selected; missing secret returns null', async (
   } finally { cleanup(); }
 });
 
+test('diary recovery stores no plaintext secret and verifies both answers', async () => {
+  const { root, config, cleanup } = await fresh();
+  try {
+    await config.setEntrySecurity('2026-10-08-demo', '秋日日记', 'private-pass', ['我的第一所学校？', '最喜欢的城市？'], ['海棠小学', '杭州']);
+    await config.save();
+    const onDisk = await readFile(join(root, 'config.json'), 'utf8');
+    assert.ok(!onDisk.includes('private-pass'));
+    assert.ok(!onDisk.includes('海棠小学'));
+    const reloaded = await HostConfig.open(root);
+    assert.deepEqual(reloaded.entrySecurityInfo('2026-10-08-demo'), { title: '秋日日记', questions: ['我的第一所学校？', '最喜欢的城市？'] });
+    await assert.rejects(() => reloaded.recoverEntryPasscode('2026-10-08-demo', ['错误', '杭州']));
+    assert.equal(await reloaded.recoverEntryPasscode('2026-10-08-demo', ['海棠小学', '杭州']), 'private-pass');
+    await reloaded.updateEntrySecurityPasscode('2026-10-08-demo', 'next-password');
+    assert.equal(await reloaded.recoverEntryPasscode('2026-10-08-demo', ['海棠小学', '杭州']), 'next-password');
+  } finally { cleanup(); }
+});
+
 test('oauth tokens, google identity and media preferences round-trip through reload', async () => {
   const { root, config, cleanup } = await fresh();
   try {
