@@ -38,7 +38,7 @@ const rows = {
   done: ['操作完成', '操作完成', 'Done', '完了', '완료'],
   characters: ['字符', '字元', 'characters', '文字', '글자'],
   storage: ['存储位置', '儲存位置', 'Storage location', '保存先', '저장 위치'],
-  about: ['Diary 重制版 · 版本 0.1.1\nAGPL-3.0 · 数据仅存本机', 'Diary 重製版 · 版本 0.1.1\nAGPL-3.0 · 資料僅存本機', 'Diary Remastered · Version 0.1.1\nAGPL-3.0 · Local data', 'Diary リマスター · バージョン 0.1.1', 'Diary 리마스터 · 버전 0.1.1'],
+  about: ['Diary 重制版 · 版本 0.1.7\nAGPL-3.0 · 数据仅存本机', 'Diary 重製版 · 版本 0.1.7\nAGPL-3.0 · 資料僅存本機', 'Diary Remastered · Version 0.1.7\nAGPL-3.0 · Local data', 'Diary リマスター · バージョン 0.1.7', 'Diary 리마스터 · 버전 0.1.7'],
   importHint: ['导入的副本将保留原文件的加密状态。', '匯入的副本將保留原檔案的加密狀態。', 'The imported copy keeps its encryption state.', 'コピーは元の暗号化状態を保ちます。', '가져온 사본은 원래 암호화 상태를 유지합니다。'],
   // v0.2: AI, accounts, profile, media, batch
   settingsAi: ['AI 模型', 'AI 模型', 'AI model', 'AI モデル', 'AI 모델'],

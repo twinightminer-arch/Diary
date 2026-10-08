@@ -4,11 +4,12 @@ import type { Entry, EntrySummary, MarkdownDocument } from './api.ts';
 import { locale, t } from './copy.ts';
 import { decryptContent, isEncrypted } from '../security/encryption.ts';
 import { parseMarkdown } from '../storage/markdown.ts';
-import { mountPortal, setPortalIdentity, setPortalNavigator, setPortalPlugins } from './portal.ts';
+import { mountPortal, prefetchCompetitionSites, setPortalIdentity, setPortalNavigator, setPortalNetwork, setPortalPlugins } from './portal.ts';
 import type { PortalViewName } from './portal.ts';
 import { weatherMetrics, weatherToMarkdown } from './weather.ts';
 import type { WeatherOk, WeatherReport } from './weather.ts';
 import { createOnboarding } from './onboarding/view.ts';
+import { installUiTranslations, refreshUiTranslations } from './ui-i18n.ts';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const title = $<HTMLInputElement>('title'), editor = $<HTMLTextAreaElement>('editor');
@@ -89,6 +90,7 @@ function translate() {
   document.querySelectorAll<HTMLInputElement>('[data-placeholder]').forEach(element => { element.placeholder = t(element.dataset.placeholder!); });
   $('breadcrumbDate').textContent = locale.date(Date.now(), { month: 'long', day: 'numeric', weekday: 'long' });
   renderList(); status();
+  refreshUiTranslations(locale.locale);
 }
 function status() {
   $('saveState').textContent = t(dirty ? 'unsaved' : 'saved');
@@ -1716,6 +1718,7 @@ $('bgLibraryPick').onclick = action(async () => {
 
 // ---------- Permissions & location ----------
 function renderPermissionState(cfg: Snapshot): void {
+  setPortalNetwork(cfg.permissions.network);
   ($('permNetwork') as HTMLInputElement).checked = cfg.permissions.network;
   ($('permLocation') as HTMLInputElement).checked = cfg.permissions.location;
   ($('locMode') as HTMLSelectElement).value = cfg.location.mode;
@@ -2092,6 +2095,7 @@ document.addEventListener('click', event => {
 });
 
 document.body.classList.toggle('dark', localStorage.getItem('diary.dark') === 'true');
+installUiTranslations(locale.locale);
 translate();
 activateView('home');
 // Boot: no account yet -> pick a sign-in method; otherwise honour "remember me".

@@ -6,6 +6,8 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.database.Cursor;
+import android.provider.OpenableColumns;
 import android.util.AtomicFile;
 import android.util.Base64;
 import android.webkit.*;
@@ -32,7 +34,7 @@ public final class MainActivity extends Activity {
   private File media;
   private int documentRequest = -1;
   private byte[] exportData;
-  private static final int IMPORT = 101, EXPORT = 102;
+  private static final int IMPORT = 101, EXPORT = 102, SOURCE_IMPORT = 103;
   private static final String ORIGIN = "https://appassets.androidplatform.net";
   // Google OAuth redirect: reverse-DNS scheme derived from the Android client ID.
   private static final String GOOGLE_SCHEME = "com.googleusercontent.apps.933958043196-8otpn6ub49h2oo2agrdjocljl5p3559g";
@@ -68,9 +70,9 @@ public final class MainActivity extends Activity {
         Uri uri = request.getUrl();
         String path = uri.getPath();
         if ("https".equals(uri.getScheme()) && "appassets.androidplatform.net".equals(uri.getHost()) &&
-            path != null && path.matches("/(index\\.html|app\\.css|(?:app|i18n|security|storage)/[a-z-]+\\.js)")) {
+            path != null && path.matches("/(index\\.html|app\\.css|(?:app|i18n|security|storage)/[a-z-]+\\.js|vendor/(?:pdf(?:\\.worker)?\\.mjs|fflate\\.js))")) {
           try {
-            String mime = path.endsWith(".js") ? "application/javascript" : path.endsWith(".css") ? "text/css" : "text/html";
+            String mime = (path.endsWith(".js") || path.endsWith(".mjs")) ? "application/javascript" : path.endsWith(".css") ? "text/css" : "text/html";
             return new WebResourceResponse(mime, "UTF-8", getAssets().open(path.substring(1)));
           } catch (IOException ignored) { }
         }
@@ -235,7 +237,7 @@ public final class MainActivity extends Activity {
               if (!target.isFile() || !target.delete()) throw new IOException("Cannot delete entry");
               break;
             }
-            case "info": result = new JSONObject().put("platform", "Android").put("location", vault.getAbsolutePath()).put("version", "0.1.6"); break;
+            case "info": result = new JSONObject().put("platform", "Android").put("location", vault.getAbsolutePath()).put("version", "0.1.7"); break;
             case "import": case "export": {
               final byte[] payload = op.equals("export") ? read(file(request.getString("id"))).getBytes(StandardCharsets.UTF_8) : null;
               final String name = request.optString("id", "diary") + ".md";
@@ -283,6 +285,46 @@ public final class MainActivity extends Activity {
             }
             case "media:remove": {
               if (!mediaFile(request.getString("id")).delete()) throw new IOException("Cannot delete media");
+              break;
+            }
+            case "sources:pick": {
+              runOnUiThread(() -> {
+                try {
+                  if (documentRequest != -1) throw new IOException("File picker is already open");
+                  documentRequest = id;
+                  Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                  intent.addCategory(Intent.CATEGORY_OPENABLE);
+                  intent.setType("*/*");
+                  intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] { "text/plain", "application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
+                  startActivityForResult(intent, SOURCE_IMPORT);
+                } catch (Exception error) { documentRequest = -1; reply(id, null, error); }
+              });
+              return;
+            }
+            case "sources:save": {
+              JSONObject source = request.getJSONObject("source");
+              String sourceId = source.getString("id");
+              if (!sourceId.matches("[a-f0-9-]{36}")) throw new IOException("Invalid source id");
+              byte[] decoded = Base64.decode(source.getString("data"), Base64.DEFAULT);
+              if (decoded.length == 0 || decoded.length > 20 * 1024 * 1024) throw new IOException("文件超过 20 MB");
+              File folder = new File(vault, "school-sources");
+              if (!folder.isDirectory() && !folder.mkdirs()) throw new IOException("Cannot create source directory");
+              File target = new File(folder, sourceId + ".json");
+              if (!target.getCanonicalFile().getParentFile().equals(folder.getCanonicalFile())) throw new IOException("Invalid source path");
+              writeJsonAtomic(target, source.toString());
+              source.remove("data"); result = source; break;
+            }
+            case "sources:list": {
+              File folder = new File(vault, "school-sources"); JSONArray sources = new JSONArray();
+              File[] files = folder.listFiles((dir, name) -> name.matches("[a-f0-9-]{36}\\.json"));
+              if (files != null) for (File item : files) { JSONObject source = new JSONObject(read(item)); source.remove("data"); sources.put(source); }
+              result = sources; break;
+            }
+            case "sources:delete": {
+              String sourceId = request.getString("id");
+              if (!sourceId.matches("[a-f0-9-]{36}")) throw new IOException("Invalid source id");
+              File target = new File(new File(vault, "school-sources"), sourceId + ".json");
+              if (!target.isFile() || !target.delete()) throw new IOException("Cannot delete source");
               break;
             }
             // Date, weather and place lookups.
@@ -379,16 +421,37 @@ public final class MainActivity extends Activity {
       });
     }
   }
+  private void writeJsonAtomic(File target, String value) throws IOException {
+    AtomicFile atomic = new AtomicFile(target); FileOutputStream output = null;
+    try { output = atomic.startWrite(); output.write(value.getBytes(StandardCharsets.UTF_8)); atomic.finishWrite(output); }
+    catch (IOException error) { if (output != null) atomic.failWrite(output); throw error; }
+  }
+  private String displayName(Uri uri) {
+    try (Cursor cursor = getContentResolver().query(uri, new String[] { OpenableColumns.DISPLAY_NAME }, null, null, null)) {
+      if (cursor != null && cursor.moveToFirst()) return cursor.getString(0);
+    } catch (Exception ignored) { }
+    return "school-source";
+  }
   @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
     super.onActivityResult(requestCode, resultCode, data);
-    if (requestCode != IMPORT && requestCode != EXPORT) return;
+    if (requestCode != IMPORT && requestCode != EXPORT && requestCode != SOURCE_IMPORT) return;
     final int id = documentRequest; final byte[] payload = exportData; documentRequest = -1; exportData = null;
     if (id == -1) return;
     if (resultCode != RESULT_OK || data == null || data.getData() == null) { reply(id, requestCode == EXPORT ? false : null, null); return; }
     Uri uri = data.getData();
     io.execute(() -> {
       try {
-        if (requestCode == IMPORT) {
+        if (requestCode == SOURCE_IMPORT) {
+          byte[] bytes;
+          try (InputStream input = getContentResolver().openInputStream(uri); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            if (input == null) throw new IOException("Cannot read source"); byte[] buffer = new byte[8192]; int count;
+            while ((count = input.read(buffer)) != -1) { if (output.size() + count > 20 * 1024 * 1024) throw new IOException("文件超过 20 MB"); output.write(buffer, 0, count); }
+            bytes = output.toByteArray();
+          }
+          String name = displayName(uri);
+          if (!name.matches("(?i).+\\.(pdf|docx|txt)$")) throw new IOException("只支持 PDF、DOCX 或 TXT 文件");
+          reply(id, new JSONObject().put("name", name).put("data", Base64.encodeToString(bytes, Base64.NO_WRAP)), null);
+        } else if (requestCode == IMPORT) {
           try (InputStream input = getContentResolver().openInputStream(uri)) { reply(id, readText(input), null); }
         } else {
           try (OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {

@@ -1,6 +1,6 @@
 {
   "name": "diary",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "type": "module",
   "license": "AGPL-3.0-only",
@@ -24,5 +24,9 @@
   },
   "main": "dist/desktop/main.js",
   "description": "Local-first diary and one-stop campus AI assistant",
-  "author": "Diary contributors"
+  "author": "Diary contributors",
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "pdfjs-dist": "^5.4.624"
+  }
 }

@@ -7,6 +7,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createServer } from 'node:http';
 import { randomBytes, randomUUID, createHash } from 'node:crypto';
 import { MarkdownEngine } from '../storage/markdown-engine.ts';
+import { SchoolDirectory } from '../host/school-directory.ts';
+import { fetchCampusCompetitions } from '../host/campus-info.ts';
+import { saveSource, listSources, deleteSource } from '../host/sources.ts';
+import type { SchoolSource } from '../app/sources.ts';
 import type { Request } from '../app/api.ts';
 import { HostConfig, DEFAULT_PROVIDER_IDS, type BackgroundState, type ChromeState, type LocationState, type PermissionState } from '../host/config.ts';
 import { loadPlugins, providerNeedsKey, type ProviderPlugin } from '../host/plugins.ts';
@@ -152,6 +156,7 @@ else {
     const dataDir = process.env.DIARY_TEST_VAULT ? join(process.env.DIARY_TEST_VAULT, '..') : app.getPath('userData');
     const vault = process.env.DIARY_TEST_VAULT || join(app.getPath('userData'), 'journals');
     const engine = await MarkdownEngine.open(vault);
+    const schoolDirectory = new SchoolDirectory(vault);
     const config = await HostConfig.open(dataDir);
     // AI plugins: every .mjs dropped into <userData>/plugins/ becomes a
     // selectable backend (see src/host/plugins.ts for the contract). Each one
@@ -301,9 +306,25 @@ else {
         codeChallenge, code, codeVerifier, baseUrl, model, url,
         kind, folder, fit, dim, blur, opacity, brightness, path, title, animated, file,
         pluginId, enabled, network, location, mode, label,
-        fontCustom, fontColor, fontSize, topbarColor, question, answer, question2, answer2,
+        fontCustom, fontColor, fontSize, topbarColor, question, answer, question2, answer2, school, schools, source,
       } = request;
       switch (op) {
+        case 'schools:list': return schoolDirectory.list(typeof query === 'string' ? query : '');
+        case 'schools:migrate': return schoolDirectory.migrate(Array.isArray(schools) ? schools : []);
+        case 'schools:upsert': return schoolDirectory.upsert(school ?? {});
+        case 'schools:delete': await schoolDirectory.remove(id!); return { ok: true };
+        case 'campus:competitions': {
+          if (!config.permissions.network) throw new Error('联网已关闭：请在设置中开启联网后再试');
+          const selected = await schoolDirectory.get(id!);
+          if (!selected) throw new Error('没有找到该学校');
+          return { school: selected, items: await fetchCampusCompetitions(selected, { fetch: net.fetch.bind(net) as unknown as typeof fetch }) };
+        }
+        case 'sources:pick': {
+          const result=await dialog.showOpenDialog(win,{properties:['openFile'],filters:[{name:'校方资料',extensions:['pdf','docx','txt']}]});if(result.canceled||!result.filePaths[0])return null;const bytes=await readFile(result.filePaths[0]);if(!bytes.length||bytes.length>20*1024*1024)throw new Error('文件须在 1 B 至 20 MB 之间');return{name:result.filePaths[0].split(/[\\/]/).pop(),data:bytes.toString('base64')};
+        }
+        case 'sources:save': return saveSource(vault, source as SchoolSource & {data:string});
+        case 'sources:list': return listSources(vault);
+        case 'sources:delete': await deleteSource(vault,id!);return{ok:true};
         case 'list': return (await engine.listEntries()).map(entry => {
           const security = config.entrySecurityInfo(entry.id);
           return { ...entry, ...(security ? { title: security.title, hasRecovery: true } : {}) };

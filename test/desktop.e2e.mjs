@@ -46,7 +46,7 @@ test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron
     // Manual replay starts the complete guide, while module skipping reaches
     // the newly integrated VPN and pet steps without spawning a second guide.
     await page.locator('#tutorialButton').click();
-    await expect(page.locator('#tutorialTitle')).toContainText('Diary 0.1.6');
+    await expect(page.locator('#tutorialTitle')).toContainText('Diary 0.1.7');
     for (let i = 0; i < 6; i++) await page.locator('#tutorialSkipModule').click();
     await expect(page.locator('#tutorialModule')).toHaveText('学校 VPN');
     await expect(page.locator('#vpnButton')).toHaveClass(/tutorial-target/);
@@ -61,6 +61,9 @@ test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron
       await page.locator('#tutorialNext').click();
       await expect(page.locator(selector)).toHaveClass(/tutorial-target/);
     }
+    await page.locator('#tutorialNext').click();
+    await expect(page.locator('#tutorialModule')).toHaveText('查找校园竞赛');
+    await expect(page.locator('#campusCompetitionOpen')).toHaveClass(/tutorial-target/);
     await page.locator('#tutorialSkipAll').click();
     await expect(page.locator('.tutorial-layer')).toBeHidden();
     await page.locator('#vpnButton').click();
@@ -128,11 +131,18 @@ test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron
     await page.locator('[name=old]').fill('diary-test-123'); await page.locator('[name=next]').fill('diary-test-456');
     await page.locator('[name=confirmation]').fill('diary-test-456'); await page.locator('#modalConfirm').click();
     await expect(page.locator('#toast')).toHaveText('操作完成');
-    await page.locator('#settings').click(); await page.locator('.settings-tabs button[data-tab="lang"]').click(); await page.locator('#cfgLocale').selectOption('en-US');
+    await page.locator('#settings').click(); await page.locator('.settings-tabs button[data-tab="lang"]').click();
+    await page.evaluate(() => { document.documentElement.style.setProperty('--chrome-font-color', '#123456'); document.documentElement.style.setProperty('--chrome-font-scale', '1.25'); });
+    await page.locator('#cfgLocale').selectOption('en-US');
     await expect(page.locator('#save')).toHaveText('Save');
+    await expect(page.locator('#primaryNav [data-view="home"] b')).toHaveText('Home');
+    assert.deepEqual(await page.evaluate(() => [getComputedStyle(document.documentElement).getPropertyValue('--chrome-font-color').trim(), getComputedStyle(document.documentElement).getPropertyValue('--chrome-font-scale').trim()]), ['#123456','1.25']);
     await page.locator('#settingsClose').click();
+    await page.reload(); await expect(page.locator('#primaryNav [data-view="home"] b')).toHaveText('Home');
     for (const view of ['home','chat','search-view','competition','guide','diary','home','diary']) await page.locator(`#primaryNav [data-view="${view}"]`).click();
     await expect(page.locator('#diaryView')).toBeVisible();
+    await page.locator('.entry-card').click();
+    await page.locator('[name=password]').fill('diary-test-456'); await page.locator('#modalConfirm').click();
     await page.locator('#theme').click(); await expect(page.locator('body')).toHaveClass('dark');
     await page.locator('#more').click(); await page.locator('#delete').click(); await page.locator('#modalConfirm').click();
     await expect(page.locator('.entry-card')).toHaveCount(0);

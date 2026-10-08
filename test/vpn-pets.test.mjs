@@ -7,8 +7,8 @@ function memoryStorage() { const values=new Map(); return {getItem:key=>values.g
 
 test('attachment VPN data is unique, safe and searchable by name alias or URL', () => {
   assert.equal(BUILTIN_VPN_SCHOOLS.length,21);
-  assert.equal(new Set(BUILTIN_VPN_SCHOOLS.map(item=>item.url)).size,21);
-  assert.ok(BUILTIN_VPN_SCHOOLS.every(item=>safeVpnUrl(item.url)?.startsWith('https://')));
+  assert.equal(new Set(BUILTIN_VPN_SCHOOLS.map(item=>item.vpnUrl)).size,21);
+  assert.ok(BUILTIN_VPN_SCHOOLS.every(item=>safeVpnUrl(item.vpnUrl)?.startsWith('https://')));
   assert.equal(filterSchools(BUILTIN_VPN_SCHOOLS,'清华')[0].id,'tsinghua');
   assert.equal(filterSchools(BUILTIN_VPN_SCHOOLS,'buaa')[0].name,'北京航空航天大学');
   assert.equal(filterSchools(BUILTIN_VPN_SCHOOLS,'webvpn.bit')[0].id,'bit');

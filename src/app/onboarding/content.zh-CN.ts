@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { TutorialStep } from './types.ts';
 
-export const TUTORIAL_VERSION = 4;
-export const moduleNames = { welcome: '开始使用', workspace: '工作台', diary: '日记', ai: 'AI 工具', campus: '校园服务', personalize: '个性化与安全', vpn: '学校 VPN', pets: '桌面宠物' } as const;
+export const TUTORIAL_VERSION = 5;
+export const moduleNames = { welcome: '开始使用', workspace: '工作台', diary: '日记', ai: 'AI 工具', campus: '校园服务', 'campus-competition': '查找校园竞赛', personalize: '个性化与安全', vpn: '学校 VPN', pets: '桌面宠物' } as const;
 
 export const tutorialSteps: readonly TutorialStep[] = [
-  { id: 'welcome', module: 'welcome', title: '欢迎使用 Diary 0.1.6', body: '这是本机优先的大学生工作台。接下来会连续介绍首页、日记、AI、校园服务、个性化、学校 VPN 与桌面宠物，全部结束后统一完成；引导不会替你执行删除、提交或联网操作。' },
+  { id: 'welcome', module: 'welcome', title: '欢迎使用 Diary 0.1.7', body: '这是本机优先的大学生工作台。接下来会连续介绍首页、日记、AI、校园服务、学校 VPN、桌面宠物与校园竞赛查询，全部结束后统一完成；引导不会替你执行删除、提交或联网操作。' },
   { id: 'privacy-first', module: 'welcome', title: '数据默认留在本机', body: '日记、账户和媒体默认保存在当前设备。联网和定位默认关闭，重要日记请定期导出备份。', target: '.offline-pill' },
   { id: 'accounts', module: 'welcome', title: '本地账户与 Google 登录', body: '本地账户可完全离线使用；Google 登录会创建或绑定本地账户，但不会把日记同步到云端。账户密保用于找回账户密码。', target: '.user-mini' },
   { id: 'navigation', module: 'workspace', title: '主要功能都在左侧', body: '首页、AI 问答、AI 搜索、竞赛中心、办事指南和日记可以从这里切换。', target: '#primaryNav', view: 'home' },
@@ -40,6 +40,7 @@ export const tutorialSteps: readonly TutorialStep[] = [
   { id: 'pet-select', module: 'pets', title: '选择或停用桌面宠物', body: '点击卡片中的“选择”启用桌宠；页面右上角可以停用，停用后动画和资源占用会立即停止。', target: '#petToggle', view: 'pets' },
   { id: 'pet-import', module: 'pets', title: '导入和删除 PetDex v2 桌宠', body: '分别选择 pet.json 与 PNG/WebP 精灵图并校验导入。用户导入的桌宠可从卡片删除，内置伙伴不会被误删。', target: '.pet-import', view: 'pets', warning: '导入前请确认素材来源和授权许可；损坏或不完整的宠物包会被拒绝。' },
   { id: 'petdex', module: 'pets', title: '从 PetDex 获取更多桌宠', body: '页面底部提供 petdex.dev/zh 外部链接。下载后回到 Diary 导入，素材版权仍归各自作者。', target: '.petdex-footer', view: 'pets' },
+  { id: 'campus-competition-entry', module: 'campus-competition', title: '查找校园竞赛', body: '点击“查找校园竞赛”，从统一学校目录搜索并选择学校；Diary 会立即尝试读取该校登记的官方页面，并明确显示加载、无结果、失败或权限限制。', target: '#campusCompetitionOpen', view: 'competition' },
   { id: 'complete', module: 'personalize', title: '教程完成', body: '你已经了解 Diary 的主要功能。记得定期导出重要日记、谨慎开启联网权限，并从侧栏“新手教程”随时复习。' },
 ];
 

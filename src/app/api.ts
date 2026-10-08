@@ -3,6 +3,8 @@ import { changePasscode, decryptBatch, decryptContent, encryptBatch, encryptCont
 import { parseMarkdown, serializeMarkdown } from '../storage/markdown.ts';
 import type { MarkdownDocument } from '../storage/markdown.ts';
 import type { Entry, EntrySummary } from '../storage/markdown-engine.ts';
+import type { SchoolRecord } from './schools.ts';
+import { BUILTIN_SCHOOLS, dedupeSchools, normaliseImportedSchool, searchSchools } from './schools.ts';
 
 export type Request = {
   op: string; id?: string; document?: MarkdownDocument; passcode?: string; next?: string; confirmation?: string; content?: string;
@@ -25,6 +27,7 @@ export type Request = {
   /** Plugin manager + permission switches. */
   pluginId?: string; enabled?: boolean; network?: boolean; location?: boolean;
   mode?: string; label?: string;
+  school?: Partial<SchoolRecord> & { url?: string }; schools?: unknown[]; source?: unknown;
 };
 declare global {
   interface Window {
@@ -144,6 +147,25 @@ function mobileConfig() {
 // Android uses the same TypeScript crypto and Markdown format over private native files.
 async function mobile(request: Request): Promise<unknown> {
   const { op, id, passcode } = request;
+  if (op.startsWith('schools:')) {
+    const custom = load<SchoolRecord[]>('school-directory', []).map(row => normaliseImportedSchool(row, row.updatedAt)).filter((row): row is SchoolRecord => !!row);
+    const all = () => [...BUILTIN_SCHOOLS, ...custom];
+    if (op === 'schools:list') return searchSchools(all(), request.query ?? '');
+    if (op === 'schools:migrate') {
+      const incoming = (request.schools ?? []).map(row => normaliseImportedSchool((row ?? {}) as Partial<SchoolRecord> & {url?:string})).filter((row): row is SchoolRecord => !!row);
+      const merged = dedupeSchools(all(), incoming); if (merged.added.length) store('school-directory', [...custom, ...merged.added]);
+      return { added: merged.added.length, duplicates: merged.duplicates, schools: [...all(), ...merged.added] };
+    }
+    if (op === 'schools:upsert') {
+      const school = normaliseImportedSchool(request.school ?? {}); if (!school) throw new Error('学校名称或 VPN 地址无效');
+      const index=custom.findIndex(item=>item.id===school.id); if(index>=0)custom[index]=school; else {if(!dedupeSchools(all(),[school]).added.length)throw new Error('该学校和 VPN 地址已经存在');custom.push(school);} store('school-directory',custom);return school;
+    }
+    if (op === 'schools:delete') { if(!id?.startsWith('custom-'))throw new Error('内置学校不能删除');store('school-directory',custom.filter(item=>item.id!==id));return {ok:true}; }
+  }
+  if (op === 'campus:competitions') {
+    const custom=load<SchoolRecord[]>('school-directory',[]);const school=[...BUILTIN_SCHOOLS,...custom].find(item=>item.id===id);if(!school)throw new Error('没有找到该学校');
+    throw new Error('Android WebView 无法直接读取多数学校官网（跨域或 VPN 权限限制），请使用系统浏览器访问学校官网');
+  }
   const file = async () => String(await native({ op: 'read', id: id! }));
   const write = (content: string, create = false) => native({ op: create ? 'create' : 'write', id: id!, content });
   if (op === 'list') {

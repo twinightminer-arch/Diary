@@ -23,7 +23,7 @@ test('first use is one continuous full tutorial and does not start a second roun
   assert.ok(modules.indexOf('pets') > modules.indexOf('vpn'));
   const restored = await engineFor('new');
   assert.equal(restored.state.status, 'completed');
-  assert.equal(restored.state.version, 4);
+  assert.equal(restored.state.version, 5);
 });
 
 test('a v0.1.4-complete user sees only VPN then pets once', async () => {
@@ -33,19 +33,22 @@ test('a v0.1.4-complete user sees only VPN then pets once', async () => {
   assert.equal(engine.state.status, 'active'); assert.equal(engine.step.module, 'vpn');
   const seen = [];
   while (engine.state.status === 'active') { seen.push(engine.step.module); engine.next(); }
-  assert.ok(seen.every(module => ['vpn', 'pets', 'personalize'].includes(module)));
+  assert.ok(seen.every(module => ['vpn', 'pets', 'campus-competition', 'personalize'].includes(module)));
   assert.ok(seen.includes('vpn')); assert.ok(seen.includes('pets'));
   const restored = await engineFor('upgraded');
   assert.equal(restored.state.status, 'completed');
 });
 
-test('v0.1.5 completion or dismissal never repeats new modules', async () => {
+test('v0.1.5 and v0.1.6 users see only the new campus competition module once', async () => {
   for (const status of ['completed', 'dismissed']) {
-    globalThis.localStorage = storage();
-    localStorage.setItem(`diary.onboarding.v3.${status}`, JSON.stringify({ version: 3, status, currentStep: 30 }));
-    const engine = await engineFor(status);
-    assert.equal(engine.state.status, status);
-    assert.equal(engine.state.version, 4);
+    for (const version of [3,4]) {
+      globalThis.localStorage = storage();
+      localStorage.setItem(`diary.onboarding.v${version}.${status}-${version}`, JSON.stringify({ version, status, currentStep: 30 }));
+      const engine = await engineFor(`${status}-${version}`);
+      assert.equal(engine.state.status, 'active');
+      assert.equal(engine.step.module, 'campus-competition');
+      engine.next(); assert.equal(engine.step.id, 'complete'); engine.next(); assert.equal(engine.state.status, 'completed');
+    }
   }
 });
 
@@ -69,7 +72,7 @@ test('module/all skipping persists and manual replay starts the complete tutoria
   restored.restart(); assert.equal(restored.state.status, 'active'); assert.equal(restored.step.id, 'welcome');
 });
 
-test('VPN and pet tutorial steps cover every requested control with valid targets', async () => {
+test('VPN, pet and campus competition tutorial steps target current controls', async () => {
   const { tutorialSteps } = await import('../src/app/onboarding/content.zh-CN.ts');
   const vpn = tutorialSteps.filter(step => step.module === 'vpn');
   const pets = tutorialSteps.filter(step => step.module === 'pets');
@@ -77,5 +80,6 @@ test('VPN and pet tutorial steps cover every requested control with valid target
   assert.deepEqual(pets.map(step => step.id), ['pet-entry', 'pet-preview', 'pet-select', 'pet-import', 'petdex']);
   assert.deepEqual(vpn.map(step => step.target), ['#vpnButton', '.vpn-toolbar', '#vpnList', '.vpn-add', '.vpn-import-actions']);
   assert.deepEqual(pets.map(step => step.target), ['#petButton', '#petList', '#petToggle', '.pet-import', '.petdex-footer']);
-  assert.ok(tutorialSteps.every(step => !/0\.1\.[0-5]/.test(`${step.title} ${step.body}`)));
+  assert.equal(tutorialSteps.find(step=>step.module==='campus-competition')?.target,'#campusCompetitionOpen');
+  assert.ok(tutorialSteps.every(step => !/0\.1\.[0-6]/.test(`${step.title} ${step.body}`)));
 });
