@@ -43,6 +43,13 @@ test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron
     await expect(page.locator('#tutorialSkipAll')).toBeVisible();
     await page.locator('#tutorialSkipAll').click();
     await expect(page.locator('.tutorial-layer')).toBeHidden();
+    await page.locator('#vpnButton').click();
+    await page.locator('#vpnSearch').fill('清华');
+    await expect(page.locator('.vpn-card')).toHaveCount(1);
+    await expect(page.locator('.vpn-card')).toContainText('清华大学');
+    await page.locator('#petButton').click();
+    await expect(page.locator('.pet-card')).toContainText('Diary 小爪');
+    await expect(page.locator('#petdexLink')).toHaveAttribute('href', '#');
     await page.locator('[data-view="diary"]').first().click();
     await expect(page.locator('#firstEntry')).toBeVisible();
     await page.locator('#firstEntry').click();

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 import type { TutorialStep } from './types.ts';
 
-export const TUTORIAL_VERSION = 2;
-export const moduleNames = { welcome: '开始使用', workspace: '工作台', diary: '日记', ai: 'AI 工具', campus: '校园服务', personalize: '个性化与安全' } as const;
+export const TUTORIAL_VERSION = 3;
+export const moduleNames = { welcome: '开始使用', workspace: '工作台', diary: '日记', ai: 'AI 工具', campus: '校园服务', personalize: '个性化与安全', vpn: '学校 VPN', pets: '桌面宠物' } as const;
 
 export const tutorialSteps: readonly TutorialStep[] = [
   { id: 'welcome', module: 'welcome', title: '欢迎使用 Diary 0.1.4', body: '这是本机优先的大学生工作台。接下来会依次介绍首页、日记、AI、校园服务与个性化功能；引导不会替你执行删除、提交或联网操作。' },
@@ -30,6 +30,11 @@ export const tutorialSteps: readonly TutorialStep[] = [
   { id: 'profile', module: 'personalize', title: '账户、资料与语言', body: '设置中可修改账户密码和密保、头像、昵称、签名、界面语言及隐私许可。', target: '#settings' },
   { id: 'plugins', module: 'personalize', title: '插件管理', body: '内置功能可以开关，外部 AI 插件从本地目录加载。外部插件是可执行代码，只使用可信来源。', target: '#pluginManage' },
   { id: 'theme-lock', module: 'personalize', title: '主题与立即锁定', body: '右上角切换深浅主题；离开设备前可点击侧栏“立即锁定”，返回登录界面保护本地内容。', target: '#lockNow' },
+  { id: 'vpn-find', module: 'vpn', title: '查找学校 VPN', body: '学校 VPN 页面支持按学校名称、简称或网址搜索，也可以从下拉栏快速定位。', target: '#vpnButton', view: 'vpn' },
+  { id: 'vpn-open-import', module: 'vpn', title: '打开与导入学校入口', body: '点击学校、网址或“打开 VPN”会调用系统浏览器。还可以添加单条学校，或预览后批量导入 CSV/JSON。', target: '.vpn-import', view: 'vpn' },
+  { id: 'pet-select', module: 'pets', title: '选择和停用桌面宠物', body: '桌宠页面显示已安装伙伴，可选择启用或随时停用；停用后动画立即停止。', target: '#petButton', view: 'pets' },
+  { id: 'pet-import', module: 'pets', title: '导入和删除 PetDex v2 桌宠', body: '选择包含 pet.json 与 PNG/WebP 精灵图的文件夹。用户导入的桌宠可以删除，内置伙伴不会被误删。', target: '.pet-import', view: 'pets', warning: '导入前请确认素材来源和授权许可。' },
+  { id: 'petdex', module: 'pets', title: '从 PetDex 获取更多桌宠', body: '页面底部提供 petdex.dev/zh 外部链接。下载后回到 Diary 导入，素材版权仍归各自作者。', target: '.petdex-footer', view: 'pets' },
   { id: 'complete', module: 'personalize', title: '教程完成', body: '你已经了解 Diary 的主要功能。记得定期导出重要日记、谨慎开启联网权限，并从侧栏“新手教程”随时复习。' },
 ];
 

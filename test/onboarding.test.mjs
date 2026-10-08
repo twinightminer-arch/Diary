@@ -20,3 +20,12 @@ test('tutorial remembers first-run state per user and skips a whole module', asy
   const other = new TutorialEngine(); other.setUser('u-2');
   assert.equal(other.state.status, 'not_started');
 });
+
+test('users who finished v0.1.4 start only at the new VPN and pets modules', async () => {
+  globalThis.localStorage = storage();
+  localStorage.setItem('diary.onboarding.v2.upgraded', JSON.stringify({ version: 2, status: 'completed', currentStep: 22 }));
+  const { TutorialEngine } = await import('../src/app/onboarding/engine.ts');
+  const engine = new TutorialEngine(); engine.setUser('upgraded');
+  assert.equal(engine.state.status, 'active'); assert.equal(engine.step.module, 'vpn');
+  engine.skipModule(); assert.equal(engine.step.module, 'pets');
+});

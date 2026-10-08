@@ -28,6 +28,11 @@ export class TutorialEngine extends EventTarget {
     try {
       const value = JSON.parse(localStorage.getItem(this.key()) ?? 'null') as TutorialProgress | null;
       if (value?.version === TUTORIAL_VERSION && Number.isInteger(value.currentStep)) return value;
+      const old = JSON.parse(localStorage.getItem(`diary.onboarding.v2.${this.userId}`) ?? 'null') as TutorialProgress | null;
+      if (old && (old.status === 'completed' || old.status === 'dismissed')) {
+        const firstNew = tutorialSteps.findIndex(step => step.module === 'vpn');
+        return { version: TUTORIAL_VERSION, status: 'active', currentStep: Math.max(0, firstNew) };
+      }
     } catch { /* use a fresh tutorial */ }
     return { version: TUTORIAL_VERSION, status: 'not_started', currentStep: 0 };
   }

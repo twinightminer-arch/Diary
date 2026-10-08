@@ -2053,12 +2053,13 @@ window.addEventListener('diary-back', () => {
 });
 
 // ---------- Unified one-stop navigation ----------
-const viewTitles: Record<PortalViewName, string> = { home: '首页', chat: 'AI 问答', 'search-view': 'AI 搜索', competition: '竞赛中心', guide: '办事指南', diary: '日记' };
+const viewTitles: Record<PortalViewName, string> = { home: '首页', chat: 'AI 问答', 'search-view': 'AI 搜索', competition: '竞赛中心', guide: '办事指南', diary: '日记', vpn: '学校 VPN', pets: '桌面宠物' };
 let activeView: PortalViewName | null = null;
 function activateView(viewName: PortalViewName) {
   if (activeView === viewName) return;
   activeView = viewName;
-  const ids: Record<PortalViewName, string> = { home: 'homeView', chat: 'chatView', 'search-view': 'searchView', competition: 'competitionView', guide: 'guideView', diary: 'diaryView' };
+  const ids: Record<PortalViewName, string> = { home: 'homeView', chat: 'chatView', 'search-view': 'searchView', competition: 'competitionView', guide: 'guideView', diary: 'diaryView', vpn: 'vpnView', pets: 'petsView' };
+  for (const [name,id] of Object.entries(ids) as [PortalViewName,string][]) if (!$(id) && (name === 'vpn' || name === 'pets')) { const panel=document.createElement('section'); panel.id=id; panel.className='portal-view'; document.querySelector('main')?.insertBefore(panel,$('toast')); }
   for (const [name, id] of Object.entries(ids) as [PortalViewName, string][]) {
     const panel = $(id); panel.hidden = name !== viewName; panel.classList.toggle('active-view', name === viewName);
   }
@@ -2081,6 +2082,8 @@ setPortalNavigator(activateView);
   button.innerHTML = '<span>?</span><b>新手教程</b>';
   button.onclick = () => onboarding.open();
   $('diaryMode').after(button);
+  const petButton = document.createElement('button'); petButton.id='petButton'; petButton.type='button'; petButton.className='nav-item'; petButton.dataset.view='pets'; petButton.innerHTML='<span>♟</span><b>桌面宠物</b>'; button.after(petButton);
+  const vpnButton = document.createElement('button'); vpnButton.id='vpnButton'; vpnButton.type='button'; vpnButton.className='nav-item'; vpnButton.dataset.view='vpn'; vpnButton.innerHTML='<span>⌁</span><b>学校 VPN</b>'; $('settings').after(vpnButton);
 }
 document.addEventListener('click', event => {
   const target = (event.target as HTMLElement).closest<HTMLElement>('[data-view]');

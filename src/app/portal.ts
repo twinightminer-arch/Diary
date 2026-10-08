@@ -8,12 +8,14 @@ import { advanceCampusCase, answerFromGuide, applicationText, createCampusCase, 
 import type { CampusCase, CampusProfile, CampusService, GuideCategory } from './campus.ts';
 import { weatherMetrics, weatherToMarkdown } from './weather.ts';
 import type { WeatherOk, WeatherReport } from './weather.ts';
+import { mountVpnPage } from './vpn.ts';
+import { mountPetsPage } from './pets.ts';
 
-export type PortalViewName = 'home' | 'chat' | 'search-view' | 'competition' | 'guide' | 'diary';
+export type PortalViewName = 'home' | 'chat' | 'search-view' | 'competition' | 'guide' | 'diary' | 'vpn' | 'pets';
 
 const VIEW_IDS: Record<PortalViewName, string> = {
   home: 'homeView', chat: 'chatView', 'search-view': 'searchView',
-  competition: 'competitionView', guide: 'guideView', diary: 'diaryView',
+  competition: 'competitionView', guide: 'guideView', diary: 'diaryView', vpn: 'vpnView', pets: 'petsView',
 };
 
 // ---------- tiny DOM helpers ----------
@@ -1156,8 +1158,14 @@ export function setPortalNavigator(handler: (view: PortalViewName) => void): voi
 
 export function mountPortal(view: PortalViewName): void {
   currentView = view;
-  const host = node(VIEW_IDS[view]);
+  let host = node(VIEW_IDS[view]);
+  if (!host && (view === 'vpn' || view === 'pets')) {
+    host = document.createElement('section'); host.id = VIEW_IDS[view]; host.className = 'portal-view';
+    document.querySelector('main')?.insertBefore(host, node('toast'));
+  }
   if (!host || view === 'diary') return;
+  if (view === 'vpn') { mountVpnPage(host, url => call({ op: 'openExternal', url })); return; }
+  if (view === 'pets') { void mountPetsPage(host); return; }
   const prompt = pendingPrompt;
   pendingPrompt = '';
   afterMount = null;
