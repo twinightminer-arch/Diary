@@ -689,6 +689,8 @@ const SITE_RETRY_COOLDOWN = 60_000;
 let competitionSites: Record<string, CompetitionSite> = readSiteCache();
 let siteFetch: Promise<void> | null = null;
 let siteCooldownUntil = 0;
+// 上一次联网查询失败（多半是没配 AI 模型 / 联网被关），用于给出准确提示。
+let siteBlocked = false;
 /** 由 app.ts 在读到配置后同步真实联网权限，避免越权发起请求。 */
 let networkAllowed = true;
 
@@ -712,10 +714,13 @@ function competitionSiteNode(item: Competition): HTMLElement {
     return button;
   }
   const pending = h('span', 'site-pending');
-  pending.textContent = networkAllowed ? '正在联网查询报名官网…' : '开启联网并配置 AI 后自动显示报名官网';
+  pending.textContent = !networkAllowed
+    ? '开启联网并配置 AI 后自动显示报名官网'
+    : siteBlocked ? '暂未查到官网链接 · 点击重试（需配置 AI 模型并联网）'
+    : '正在联网查询报名官网…';
   if (networkAllowed) {
     pending.title = '点击立即重试';
-    pending.onclick = () => { siteCooldownUntil = 0; void prefetchCompetitionSites(); };
+    pending.onclick = () => { siteCooldownUntil = 0; siteBlocked = false; paintCompetitions(); void prefetchCompetitionSites(); };
   }
   return pending;
 }
@@ -736,6 +741,7 @@ async function fetchCompetitionSite(item: Competition): Promise<boolean> {
   const answer = await call<string>({ op: 'web:search', query: sitePrompt(item) });
   const url = extractSiteUrl(typeof answer === 'string' ? answer : '');
   if (!url) return false;
+  siteBlocked = false;
   competitionSites = { ...competitionSites, [item.name]: { url, updatedAt: Date.now() } };
   return true;
 }
@@ -754,7 +760,8 @@ export async function prefetchCompetitionSites(): Promise<void> {
       try {
         if (await fetchCompetitionSite(item)) changed = true;
       } catch {
-        // 多半是未配置 AI Key 或联网被关：退避一段时间，别让每次渲染都重试。
+        // 多半是未配置 AI Key 或联网被关：标记并退避一段时间，别让每次渲染都重试。
+        siteBlocked = true;
         siteCooldownUntil = Date.now() + SITE_RETRY_COOLDOWN;
         break;
       }
