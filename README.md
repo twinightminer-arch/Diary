@@ -42,7 +42,7 @@ flowchart TB
 
   V019 --> NOW([当前设计<br/>Electron Windows + 原生 WebView Android<br/>本地优先 · 可迁移 · 可验证 · 跨模块校园数据])
 
-  classDef root fill:#155eef,color:#fff,stroke:#0b3fa8,stroke-width:2px;
+  classDef root fill:#e8f3ff,color:#155eef,stroke:#155eef,stroke-width:2px;
   classDef legacy fill:#fff3d6,color:#5b3a00,stroke:#d89b22;
   classDef rebuild fill:#eaf8f1,color:#124b33,stroke:#36a269;
   classDef branch fill:#f0edff,color:#352273,stroke:#7761d8;
