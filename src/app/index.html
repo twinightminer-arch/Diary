@@ -30,8 +30,8 @@
     <p class="hint" id="bgFolderHint">这里列出的就是背景库文件夹里的文件，点一个即可设为背景；也可以直接把图片或视频复制进该文件夹。</p>
   </section>
   <div class="bg-controls">
-    <label class="field"><span>适应方式</span><select id="bgFit"><option value="contain">完整显示（原画质，不裁切）</option><option value="cover">铺满裁切（放大填满，画面会被裁掉）</option><option value="fill">拉伸铺满（不留边，可能变形）</option><option value="tile">平铺</option><option value="center">居中原始尺寸</option></select></label>
-    <p class="hint">默认「完整显示」：整个画面按原始分辨率完整呈现，不做放大裁切，画质与源文件一致。想要一点空白都没有，选「拉伸铺满」。</p>
+    <label class="field"><span>适应方式</span><select id="bgFit"><option value="fill">工作区铺满（默认，不留空白）</option><option value="contain">完整显示（不裁切，可能留边）</option><option value="cover">等比铺满（可能裁切）</option><option value="tile">平铺</option><option value="center">居中原始尺寸</option></select></label>
+    <p class="hint">默认「工作区铺满」：完整覆盖工作台所有空白区域；透明度 0%、亮度 100%、暗化与模糊 0 时不对源画质增加任何滤镜。</p>
     <label class="field"><span>透明度 <b id="bgOpacityValue">0%</b></span><input id="bgOpacity" type="range" min="0" max="100" step="5" value="0"></label>
     <label class="field"><span>亮度 <b id="bgBrightnessValue">100%</b></span><input id="bgBrightness" type="range" min="50" max="150" step="5" value="100"></label>
     <label class="field"><span>暗化 <b id="bgDimValue">0%</b></span><input id="bgDim" type="range" min="0" max="90" step="5" value="0"></label>

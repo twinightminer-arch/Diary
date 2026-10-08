@@ -121,6 +121,22 @@ body.has-bg .view-heading,body.has-bg .section-head,body.has-bg .result-meta,bod
 .bg-layer{position:fixed;top:0;bottom:0;left:var(--sidebar-w);right:0;z-index:-3;pointer-events:none;object-fit:cover;background-repeat:no-repeat;background-position:center;background-size:cover;filter:var(--bg-filter,none);transform:var(--bg-transform,none);opacity:calc(1 - var(--bg-fade,0))}
 .bg-dim{position:fixed;top:0;bottom:0;left:var(--sidebar-w);right:0;z-index:-2;pointer-events:none;background:#000;opacity:0;transition:opacity .2s}
 .bg-veil{position:fixed;top:0;bottom:0;left:var(--sidebar-w);right:0;z-index:-1;pointer-events:none;background:#f6f8fc;opacity:0;transition:opacity .2s}
+/* Readability controls must override the diary editor's explicit theme colors.
+   Merely setting color on <main> cannot beat #title/#editor/.view-tabs rules. */
+body.chrome-custom.has-bg .diary-view #title,
+body.chrome-custom.has-bg .diary-view #editor,
+body.chrome-custom.has-bg .diary-view .markdown,
+body.chrome-custom.has-bg .diary-view .document-kicker,
+body.chrome-custom.has-bg .diary-view .view-tabs button,
+body.chrome-custom.has-bg .diary-view .document-actions button,
+body.chrome-custom.has-bg .diary-view .document-footer,
+body.chrome-custom.has-bg .diary-view .empty,
+body.chrome-custom.has-bg .diary-view .empty p,
+body.chrome-custom.has-bg .diary-view .empty small,
+body.chrome-custom.has-bg .portal-view>.view-heading,
+body.chrome-custom.has-bg .portal-view>.view-heading p,
+body.chrome-custom.has-bg .portal-view>.section-head,
+body.chrome-custom.has-bg .portal-view>.section-head p{color:var(--chrome-font-color)!important}
 /* ---- Responsive ---- */
 @media(max-width:620px){
   .popover{top:66px;right:12px;left:12px;width:auto}

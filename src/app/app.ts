@@ -229,7 +229,7 @@ const CHROME_FALLBACK: ChromeState = { fontCustom: false, fontColor: '#20283a', 
 /** Used when a snapshot carries no background at all (the Android shell). */
 const NO_BACKGROUND: BackgroundState = {
   kind: null, media: null, file: null, wallpaper: null,
-  fit: 'contain', dim: 0, blur: 0, opacity: 0, brightness: 100,
+  fit: 'fill', dim: 0, blur: 0, opacity: 0, brightness: 100,
 };
 type BuiltinPlugin = { id: string; name: string; description: string; version: string; kind: 'builtin'; enabled: boolean };
 type PluginInfo = { file: string; id: string; label: string; baseUrl: string; model: string; custom: boolean; models: string[]; enabled: boolean };
@@ -822,7 +822,7 @@ function paintBackgroundAppearance(bg: BackgroundState, image: HTMLElement, vide
   // 直接 `none`，静止图连合成层都不建。
   document.documentElement.style.setProperty('--bg-transform', blur > 0 ? 'scale(1.06)' : 'none');
 
-  const fit = bg.fit ?? 'contain';
+  const fit = bg.fit ?? 'fill';
   if (paintedIsVideo) {
     video.style.objectFit = fit === 'cover' ? 'cover' : fit === 'fill' ? 'fill' : 'contain';
   } else {
@@ -922,6 +922,7 @@ let topbarColorChosen = false;
 
 function applyChrome(chrome: ChromeState): void {
   const root = document.documentElement;
+  document.body.classList.toggle('chrome-custom', chrome.fontCustom);
   if (!chrome.fontCustom) {
     for (const name of CHROME_VARS) root.style.removeProperty(name);
     return;
@@ -962,8 +963,9 @@ function readChromePanel(): ChromeState {
 
 /** 保存并重新读回配置：宿主会把颜色和字号都过一遍消毒，不让非法值落盘。 */
 async function saveChrome(patch: Partial<ChromeState>): Promise<void> {
-  await call({ op: 'chrome:set', ...patch });
-  await loadConfig();
+  const chrome = await call<ChromeState>({ op: 'chrome:set', ...patch });
+  applyChrome(chrome);
+  renderChromePanel(chrome);
 }
 
 $<HTMLInputElement>('chromeCustom').onchange = action(async () => {
@@ -1506,10 +1508,26 @@ function renderBackgroundLibrary(items: LibraryItem[], active: BackgroundState):
     grid.append(card);
   }
 }
-$('bgFit').onchange = action(async () => {
-  await call({ op: 'background:set', fit: ($('bgFit') as HTMLSelectElement).value });
-  await loadConfig();
-});
+{
+  const fit = $<HTMLSelectElement>('bgFit');
+  // Apply immediately so the user can see every fit mode without waiting for
+  // disk I/O. Persisting uses the sanitised state returned by the host and
+  // updates only the wallpaper, never reloads the video or the whole settings UI.
+  fit.oninput = () => {
+    const image = $('bgImage'), video = $<HTMLVideoElement>('bgVideo');
+    const value = fit.value;
+    video.style.objectFit = value === 'cover' ? 'cover' : value === 'fill' ? 'fill' : 'contain';
+    image.style.backgroundSize = value === 'contain' ? 'contain'
+      : value === 'fill' ? '100% 100%'
+        : value === 'center' || value === 'tile' ? 'auto' : 'cover';
+    image.style.backgroundRepeat = value === 'tile' ? 'repeat' : 'no-repeat';
+  };
+  fit.onchange = action(async () => {
+    const background = await call<BackgroundState>({ op: 'background:set', fit: fit.value });
+    applyBackground(background);
+    renderBackgroundPanel(background);
+  });
+}
 
 /**
  * Live preview while dragging; only the release persists. `opacity` reads
@@ -1546,11 +1564,12 @@ function bindBackgroundSlider(id: 'bgDim' | 'bgBlur' | 'bgOpacity' | 'bgBrightne
   };
   input.onchange = action(async () => {
     const value = Number(input.value);
-    await call(id === 'bgDim' ? { op: 'background:set', dim: value / 100 }
+    const background = await call<BackgroundState>(id === 'bgDim' ? { op: 'background:set', dim: value / 100 }
       : id === 'bgBlur' ? { op: 'background:set', blur: value }
         : id === 'bgBrightness' ? { op: 'background:set', brightness: value }
           : { op: 'background:set', opacity: value });
-    await loadConfig();
+    applyBackground(background);
+    renderBackgroundPanel(background);
   });
 }
 bindBackgroundSlider('bgOpacity', 'bgOpacityValue', '%');
@@ -1868,7 +1887,23 @@ $('save').onclick = action(save);
 $('search').oninput = renderList;
 title.oninput = editor.oninput = () => { dirty = true; status(); };
 $('editTab').onclick = () => view(false); $('previewTab').onclick = () => view(true);
-$('more').onclick = () => { $('moreMenu').hidden = !$('moreMenu').hidden; };
+$('more').onclick = (event) => {
+  event.stopPropagation();
+  $('moreMenu').hidden = !$('moreMenu').hidden;
+};
+// The menu belongs to the three-dot button, not to the whole editor. Clicking
+// anywhere beside it (including the wallpaper) dismisses it; clicks inside keep
+// it open so Export/Delete remain usable. Capture phase also survives handlers
+// on dynamically rendered portal content.
+document.addEventListener('pointerdown', (event) => {
+  const menu = $('moreMenu');
+  if (menu.hidden) return;
+  const target = event.target;
+  if (!(target instanceof Node) || (!menu.contains(target) && !$('more').contains(target))) menu.hidden = true;
+}, true);
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') $('moreMenu').hidden = true;
+});
 $('openSidebar').onclick = () => document.body.classList.add('sidebar-open');
 $('closeSidebar').onclick = () => document.body.classList.remove('sidebar-open');
 $('theme').onclick = () => { document.body.classList.toggle('dark'); localStorage.setItem('diary.dark', String(document.body.classList.contains('dark'))); };

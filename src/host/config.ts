@@ -182,8 +182,8 @@ export const DEFAULT_PROVIDER_IDS: ReadonlySet<string> = new Set(Object.keys(DEF
 
 export const EMPTY_BACKGROUND: BackgroundState = {
   kind: null, media: null, file: null, wallpaper: null,
-  // 完整显示为默认：画面原画质、不裁切、不放大。
-  fit: 'contain', dim: 0, blur: 0, opacity: 0, brightness: 100,
+  // 工作区默认不留空白；像素不经过滤镜、遮罩或透明处理。
+  fit: 'fill', dim: 0, blur: 0, opacity: 0, brightness: 100,
 };
 
 /** Design baseline: every other text size is expressed as a ratio of this. */

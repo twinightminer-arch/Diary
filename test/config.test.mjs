@@ -95,7 +95,7 @@ test('the flat pre-plugin background value migrates into the new shape', async (
     assert.equal(reloaded.media.background.kind, 'image');
     assert.equal(reloaded.media.background.media, 'legacy-bg');
     // 默认「完整显示」：原画质、不裁切、不放大。
-    assert.equal(reloaded.media.background.fit, 'contain');
+    assert.equal(reloaded.media.background.fit, 'fill');
     // 迁移出来的配置必须带上新的可读性字段，否则面板会拿到 undefined。
     assert.equal(reloaded.media.chrome.fontCustom, false);
     assert.equal(reloaded.media.chrome.fontSize, 15);

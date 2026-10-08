@@ -83,6 +83,12 @@ test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron
     await page.locator('#previewTab').click();
     await expect(page.locator('#preview strong')).toHaveText('Markdown');
     assert.equal(await page.evaluate(() => window.injected), undefined);
+    // Regression: the three-dot menu must dismiss when the user clicks beside
+    // it, while remaining fully usable when clicked again.
+    await page.locator('#more').click();
+    await expect(page.locator('#moreMenu')).toBeVisible();
+    await page.locator('#title').click();
+    await expect(page.locator('#moreMenu')).toBeHidden();
     await page.locator('#more').click(); await page.locator('#changePassword').click();
     await page.locator('[name=old]').fill('diary-test-123'); await page.locator('[name=next]').fill('diary-test-456');
     await page.locator('[name=confirmation]').fill('diary-test-456'); await page.locator('#modalConfirm').click();
