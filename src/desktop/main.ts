@@ -12,6 +12,7 @@ import { fetchCampusCompetitions } from '../host/campus-info.ts';
 import { saveSource, listSources, deleteSource, updateSource } from '../host/sources.ts';
 import type { SchoolSource } from '../app/sources.ts';
 import type { Request } from '../app/api.ts';
+import { safeWebUrl } from '../app/schools.ts';
 import { HostConfig, DEFAULT_PROVIDER_IDS, type BackgroundState, type ChromeState, type LocationState, type PermissionState } from '../host/config.ts';
 import { loadPlugins, providerNeedsKey, type ProviderPlugin } from '../host/plugins.ts';
 import { buildAgent } from '../agent/skills.ts';
@@ -38,6 +39,12 @@ if (process.env.DIARY_TEST_HOME) app.setPath('userData', process.env.DIARY_TEST_
 app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+
+async function openSafeExternal(value: unknown): Promise<void> {
+  const safeUrl = typeof value === 'string' ? safeWebUrl(value) : null;
+  if (!safeUrl) throw new Error('网址无效，只允许安全的 HTTP 或 HTTPS 地址');
+  await shell.openExternal(safeUrl);
+}
 
 // Wallpapers and imported clips live outside the app bundle, and the renderer
 // runs under a CSP that rejects file:// URLs. A privileged custom scheme is the
@@ -373,7 +380,7 @@ else {
         }
         case 'info': return { platform: 'Windows', location: vault, version: app.getVersion() };
         case 'showFolder': return shell.openPath(vault);
-        case 'openExternal': await shell.openExternal(String(url)); return { ok: true };
+        case 'openExternal': await openSafeExternal(url); return { ok: true };
         case 'import': {
           const result = await dialog.showOpenDialog(win, { filters: [{ name: 'Markdown', extensions: ['md'] }], properties: ['openFile'] });
           if (result.canceled || !result.filePaths[0]) return null;
@@ -800,8 +807,14 @@ else {
       webPreferences: { preload: join(appDir, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, backgroundThrottling: false, sandbox: process.env.DIARY_TEST_NO_SANDBOX !== '1' },
     });
     win.setMenuBarVisibility(false);
-    win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-    win.webContents.on('will-navigate', event => event.preventDefault());
+    win.webContents.setWindowOpenHandler(({ url }) => {
+      void openSafeExternal(url).catch(() => undefined);
+      return { action: 'deny' };
+    });
+    win.webContents.on('will-navigate', (event, url) => {
+      event.preventDefault();
+      void openSafeExternal(url).catch(() => undefined);
+    });
     win.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
     win.webContents.on('will-prevent-unload', event => {
       const choice = dialog.showMessageBoxSync(win!, { type: 'question', buttons: ['继续编辑 / Keep editing', '放弃修改 / Discard'], defaultId: 0, cancelId: 0, message: '有未保存的修改。Unsaved changes.' });

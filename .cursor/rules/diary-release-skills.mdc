@@ -1,0 +1,14 @@
+---
+description: Diary 跨平台构建、验证与发布必须使用的本机 Skill
+alwaysApply: true
+---
+
+# Diary 发布 Skill
+
+- Windows EXE、安装包、图标或快捷方式任务开始前，完整读取并遵循 `C:\Users\李忠浩\.codex\skills\win-gui-tool-exe\SKILL.md`。
+- Android 构建后的模拟器启动、安装或验证开始前，完整读取并遵循 `C:\Users\李忠浩\.codex\skills\android-emulator-start\SKILL.md`。
+- Diary 是 Electron 应用；Windows 端使用现有 Electron/electron-builder 构建链，不得改用 tkinter 或 PyInstaller 重写。
+- Android 模拟器以 `adb devices` 和 `getprop sys.boot_completed=1` 为准，使用 `-no-snapshot-save -no-boot-anim -no-audio`，禁止未经确认执行 `-wipe-data`。
+- 发布必须实际验证产物；更新现有桌面/开始菜单快捷方式后读回目标、工作目录和图标。
+- 二进制产物上传 GitHub Release。便携版完成后，先询问用户是否还要制作并上传 Setup 安装包。
+- 不提交密钥、签名库、密码、令牌、Cookie、用户数据、构建缓存或模拟器文件。
