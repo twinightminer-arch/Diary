@@ -35,6 +35,14 @@ test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron
       await page.locator('#modalConfirm').click();
       await expect(lock).toBeHidden({ timeout: 15000 });
     }
+    // A newly created account must receive the first-run guide. Verify both
+    // top-right skip controls exist, then dismiss it so the legacy CRUD flow
+    // below can continue and prove no underlying feature regressed.
+    await expect(page.locator('.tutorial-layer')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('#tutorialSkipModule')).toBeVisible();
+    await expect(page.locator('#tutorialSkipAll')).toBeVisible();
+    await page.locator('#tutorialSkipAll').click();
+    await expect(page.locator('.tutorial-layer')).toBeHidden();
     await page.locator('[data-view="diary"]').first().click();
     await expect(page.locator('#firstEntry')).toBeVisible();
     await page.locator('#firstEntry').click();

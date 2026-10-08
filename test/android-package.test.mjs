@@ -11,6 +11,6 @@ test('Android shell allows screenshots and serves canonical asset paths', async 
   assert.match(activity, /appassets\.androidplatform\.net/);
   assert.doesNotMatch(build, /'-A',\(Join-Path \$root 'dist\/web'\)/);
   assert.match(build, /'assets'/);
-  assert.match(manifest, /android:versionCode="7"/);
-  assert.match(manifest, /android:versionName="0\.1\.3"/);
+  assert.match(manifest, /android:versionCode="8"/);
+  assert.match(manifest, /android:versionName="0\.1\.4"/);
 });

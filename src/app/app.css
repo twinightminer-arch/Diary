@@ -525,3 +525,20 @@ body.dark .wallpaper-card em{color:#e0b155}
 .bg-library .wallpaper-card{position:relative}
 .bg-library .wallpaper-card.active{outline:2px solid #2f6bff;outline-offset:1px}
 .media-gallery-title{margin:14px 0 6px;font-size:calc(12px * var(--chrome-font-scale,1));color:var(--muted);font-weight:600}
+
+/* ===== first-run onboarding ===== */
+.tutorial-nav span{border:1px solid currentColor;border-radius:50%;font-size:12px!important;line-height:17px;height:19px}
+/* The diary catalogue and the extra tutorial entry must coexist on shorter
+   laptop screens without the footer covering the last diary title. */
+.sidebar:has(#diarySidebar:not([hidden])) .brand{padding-bottom:10px}
+.sidebar:has(#diarySidebar:not([hidden])) .workspace-label{display:none}
+.sidebar:has(#diarySidebar:not([hidden])) .primary-nav{gap:2px}
+.sidebar:has(#diarySidebar:not([hidden])) .primary-nav .nav-item{height:31px}
+.sidebar:has(#diarySidebar:not([hidden])) .sidebar-footer{padding-top:4px;margin-top:4px}
+.sidebar:has(#diarySidebar:not([hidden])) .sidebar-footer .nav-item{height:27px}
+.tutorial-layer{position:fixed;inset:0;z-index:1000}.tutorial-scrim{position:absolute;inset:0;background:#071126b8;backdrop-filter:blur(1px)}
+.tutorial-top-actions{position:fixed;z-index:1005;right:22px;top:18px;display:flex;gap:8px}.tutorial-top-actions button{border:1px solid #ffffff70;border-radius:8px;background:#152341;color:#fff;padding:9px 13px;font-size:12px}
+.tutorial-card{position:fixed;z-index:1004;width:min(430px,calc(100vw - 24px));max-height:calc(100vh - 92px);overflow:auto;background:var(--field);color:var(--ink);border:1px solid var(--line);border-radius:16px;padding:25px;box-shadow:0 24px 80px #02081770}
+.tutorial-card h2{margin:13px 0 10px;font-size:22px}.tutorial-card p{font-size:13px;line-height:1.8;color:var(--muted)}.tutorial-meta{display:flex;justify-content:space-between;color:var(--accent);font-size:11px}.tutorial-warning{padding:10px 12px;background:#fff2db;color:#8a5a12!important;border-radius:8px}.tutorial-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}.tutorial-actions button{padding:10px 15px;border-radius:8px}.tutorial-actions button:first-child{border:1px solid var(--line)}
+.tutorial-target{position:relative!important;z-index:1003!important;outline:4px solid #6f89ff!important;outline-offset:5px!important;box-shadow:0 0 0 10px #6f89ff2e!important}
+@media(max-width:620px){.tutorial-top-actions{right:12px;top:10px}.tutorial-top-actions button{padding:8px}.tutorial-card{left:12px!important;top:auto!important;bottom:12px;max-height:70vh}}

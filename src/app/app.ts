@@ -8,6 +8,7 @@ import { mountPortal, setPortalIdentity, setPortalNavigator, setPortalPlugins } 
 import type { PortalViewName } from './portal.ts';
 import { weatherMetrics, weatherToMarkdown } from './weather.ts';
 import type { WeatherOk, WeatherReport } from './weather.ts';
+import { createOnboarding } from './onboarding/view.ts';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const title = $<HTMLInputElement>('title'), editor = $<HTMLTextAreaElement>('editor');
@@ -17,6 +18,7 @@ let entries: SidebarEntry[] = [];
 let toastTimer: ReturnType<typeof setTimeout>;
 let unlocked = true;
 let selected = new Set<string>();
+const onboarding = createOnboarding(viewName => activateView(viewName));
 type Field = { name: string; label: string; type?: string; options?: [string, string][]; required?: boolean };
 type ModalOptions = { extras?: { label: string; action: string }[] };
 function modal(heading: string, message = '', fields: Field[] = [], options: ModalOptions = {}): Promise<Record<string, string> | null> {
@@ -449,12 +451,17 @@ async function refreshSnapshot(): Promise<Snapshot | null> {
   catch { return lastSnapshot; }
 }
 
+function startOnboardingAfterEntry(autoStart: boolean): void {
+  onboarding.syncUser(lastSnapshot?.currentUser?.id ?? 'guest', autoStart);
+}
+
 /** Shared success path after Google sign-in or account creation. */
 async function afterGoogle(info: { email?: string; name?: string; picture?: string | null }): Promise<void> {
   // The host already stored the Google identity and profile; just re-read state.
   await refreshSnapshot();
   const name = lastSnapshot?.currentUser?.displayName ?? info.name ?? info.email ?? '';
   hideLock(); await loadConfig(); await refresh();
+  startOnboardingAfterEntry(true);
   toast(`已登录：${name}`);
 }
 
@@ -468,6 +475,7 @@ $('authSubmit').onclick = action(async () => {
   await call({ op: 'account:signIn', username, passcode, remember });
   await refreshSnapshot();
   hideLock(); await loadConfig(); await refresh();
+  startOnboardingAfterEntry(true);
   toast('登录成功');
 });
 $('authPasscode').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); $('authSubmit').click(); } });
@@ -487,6 +495,7 @@ $('offlineCreate').onclick = action(async () => {
   });
   await refreshSnapshot();
   hideLock(); await loadConfig(); await refresh();
+  startOnboardingAfterEntry(true);
   toast(`本地账户「${r.nickname || r.username}」已创建`);
 });
 
@@ -2066,6 +2075,13 @@ function activateView(viewName: PortalViewName) {
 }
 // Portal screens move the router through this hook (prompt chips -> chat).
 setPortalNavigator(activateView);
+{
+  const button = document.createElement('button');
+  button.id = 'tutorialButton'; button.type = 'button'; button.className = 'nav-item tutorial-nav';
+  button.innerHTML = '<span>?</span><b>新手教程</b>';
+  button.onclick = () => onboarding.open();
+  $('diaryMode').after(button);
+}
 document.addEventListener('click', event => {
   const target = (event.target as HTMLElement).closest<HTMLElement>('[data-view]');
   const name = target?.dataset.view as PortalViewName | undefined;
@@ -2085,6 +2101,7 @@ void action(async () => {
     // Remembered account: skip the password prompt and go straight in.
     unlocked = true; $('lockScreen').hidden = true;
     await loadConfig(); await refresh();
+    startOnboardingAfterEntry(true);
     toast(`欢迎回来，${cfg.currentUser.displayName}`);
     return;
   } else {
