@@ -9,7 +9,10 @@ export class TutorialEngine extends EventTarget {
   get steps() { return tutorialSteps; }
   get step() { return tutorialSteps[Math.min(this.progress.currentStep, tutorialSteps.length - 1)]!; }
   setUser(userId: string): void { this.userId = userId || 'guest'; this.progress = this.load(); this.changed(); }
+  /** Resume automatic onboarding without discarding saved progress. */
   start(): void { this.progress = { ...this.progress, status: 'active', currentStep: this.progress.status === 'active' ? this.progress.currentStep : 0 }; this.commit(); }
+  /** A deliberate sidebar launch always replays the complete current tutorial. */
+  restart(): void { this.progress = { version: TUTORIAL_VERSION, status: 'active', currentStep: 0 }; this.commit(); }
   next(): void {
     if (this.progress.currentStep >= tutorialSteps.length - 1) this.progress = { ...this.progress, status: 'completed' };
     else this.progress = { ...this.progress, currentStep: this.progress.currentStep + 1 };
@@ -24,15 +27,36 @@ export class TutorialEngine extends EventTarget {
   }
   skipAll(): void { this.progress = { ...this.progress, status: 'dismissed' }; this.commit(); }
   private key(): string { return `diary.onboarding.v${TUTORIAL_VERSION}.${this.userId}`; }
+  private migrate(old: TutorialProgress, oldVersion: 2 | 3): TutorialProgress {
+    const terminal = old.status === 'completed' || old.status === 'dismissed';
+    if (oldVersion === 3 && terminal) return { version: TUTORIAL_VERSION, status: old.status, currentStep: tutorialSteps.length - 1 };
+    if (oldVersion === 2 && terminal) {
+      const firstNew = tutorialSteps.findIndex(step => step.module === 'vpn');
+      return { version: TUTORIAL_VERSION, status: 'active', currentStep: Math.max(0, firstNew) };
+    }
+    if (old.status === 'not_started') return { version: TUTORIAL_VERSION, status: 'not_started', currentStep: 0 };
+    // v2 and v3 both stored a numeric index. Their common steps occupy the
+    // same prefix; v3's added steps are mapped by stable IDs after expansion.
+    const v3Ids = [
+      'welcome','privacy-first','accounts','navigation','home','tutorial-entry','new-diary','save-preview','diary-catalog','diary-menu','diary-import','diary-security','diary-tools','batch','ai-model','ai-chat','ai-search','competition','guide','guide-local','wallpaper','music-media','profile','plugins','theme-lock','vpn-find','vpn-open-import','pet-select','pet-import','petdex','complete',
+    ];
+    const oldId = oldVersion === 3 ? v3Ids[old.currentStep] : tutorialSteps[old.currentStep]?.id;
+    const mapped = oldId ? tutorialSteps.findIndex(step => step.id === oldId) : -1;
+    // The former combined VPN import step now begins at the first still unseen
+    // VPN operation, so interrupted users do not lose tutorial coverage.
+    const currentStep = oldId === 'vpn-open-import'
+      ? tutorialSteps.findIndex(step => step.id === 'vpn-open')
+      : mapped;
+    return { version: TUTORIAL_VERSION, status: 'active', currentStep: Math.max(0, currentStep) };
+  }
   private load(): TutorialProgress {
     try {
       const value = JSON.parse(localStorage.getItem(this.key()) ?? 'null') as TutorialProgress | null;
       if (value?.version === TUTORIAL_VERSION && Number.isInteger(value.currentStep)) return value;
-      const old = JSON.parse(localStorage.getItem(`diary.onboarding.v2.${this.userId}`) ?? 'null') as TutorialProgress | null;
-      if (old && (old.status === 'completed' || old.status === 'dismissed')) {
-        const firstNew = tutorialSteps.findIndex(step => step.module === 'vpn');
-        return { version: TUTORIAL_VERSION, status: 'active', currentStep: Math.max(0, firstNew) };
-      }
+      const v3 = JSON.parse(localStorage.getItem(`diary.onboarding.v3.${this.userId}`) ?? 'null') as TutorialProgress | null;
+      if (v3?.version === 3 && Number.isInteger(v3.currentStep)) return this.migrate(v3, 3);
+      const v2 = JSON.parse(localStorage.getItem(`diary.onboarding.v2.${this.userId}`) ?? 'null') as TutorialProgress | null;
+      if (v2?.version === 2 && Number.isInteger(v2.currentStep)) return this.migrate(v2, 2);
     } catch { /* use a fresh tutorial */ }
     return { version: TUTORIAL_VERSION, status: 'not_started', currentStep: 0 };
   }

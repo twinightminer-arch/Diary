@@ -16,8 +16,17 @@ export function createOnboarding(navigate: (view: PortalViewName) => void) {
     if (target) { highlighted = target; target.classList.add('tutorial-target'); target.scrollIntoView({ block: 'center', inline: 'nearest' }); }
     requestAnimationFrame(() => {
       const width = Math.min(430, innerWidth - 24); const box = target?.getBoundingClientRect();
-      const left = box ? Math.max(12, Math.min(innerWidth - width - 12, box.right + 16)) : Math.max(12, innerWidth - width - 22);
-      const top = box ? Math.max(70, Math.min(innerHeight - card.offsetHeight - 12, box.top)) : Math.max(70, (innerHeight - card.offsetHeight) / 2);
+      const gap = 16, maxLeft = innerWidth - width - 12, maxTop = innerHeight - card.offsetHeight - 12;
+      let left = Math.max(12, innerWidth - width - 22), top = Math.max(70, (innerHeight - card.offsetHeight) / 2);
+      if (box) {
+        if (innerWidth - box.right >= width + gap) left = box.right + gap;
+        else if (box.left >= width + gap) left = box.left - width - gap;
+        else left = Math.max(12, Math.min(maxLeft, (innerWidth - width) / 2));
+        if (innerWidth - box.right < width + gap && box.left < width + gap) {
+          top = box.bottom + gap + card.offsetHeight <= innerHeight ? box.bottom + gap : box.top - card.offsetHeight - gap;
+        } else top = box.top;
+        top = Math.max(70, Math.min(maxTop, top));
+      }
       card.style.left = `${left}px`; card.style.top = `${top}px`;
     });
   };
@@ -29,10 +38,12 @@ export function createOnboarding(navigate: (view: PortalViewName) => void) {
     find('tutorialModule').textContent = moduleNames[step.module];
     find('tutorialProgress').textContent = `${engine.state.currentStep + 1} / ${engine.steps.length}`;
     find('tutorialTitle').textContent = step.title; find('tutorialBody').textContent = step.body;
-    const warning = find('tutorialWarning'); warning.hidden = !step.warning; warning.textContent = step.warning ?? '';
+    const target = step.target ? document.querySelector<HTMLElement>(step.target) : null;
+    const unavailable = step.target && !target ? '当前目标控件暂不可用，你仍可点击“下一步”继续，或使用右上角按钮跳过。' : '';
+    const warning = find('tutorialWarning'); warning.hidden = !(step.warning || unavailable); warning.textContent = [step.warning, unavailable].filter(Boolean).join(' ');
     find<HTMLButtonElement>('tutorialBack').disabled = engine.state.currentStep === 0;
     find('tutorialNext').textContent = engine.state.currentStep === engine.steps.length - 1 ? '完成教程' : '下一步';
-    setTimeout(() => place(step.target ? document.querySelector<HTMLElement>(step.target) : null), 0);
+    setTimeout(() => place(target), 0);
   };
   find('tutorialNext').onclick = () => engine.next(); find('tutorialBack').onclick = () => engine.back();
   find('tutorialSkipModule').onclick = () => engine.skipModule(); find('tutorialSkipAll').onclick = () => engine.skipAll();
@@ -40,7 +51,7 @@ export function createOnboarding(navigate: (view: PortalViewName) => void) {
   window.addEventListener('resize', render);
   return {
     syncUser(userId: string, autoStart: boolean) { engine.setUser(userId); if (autoStart && engine.state.status === 'not_started') engine.start(); },
-    open() { engine.start(); },
+    open() { engine.restart(); },
     state: () => engine.state,
   };
 }

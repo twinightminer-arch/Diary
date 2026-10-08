@@ -235,7 +235,7 @@ public final class MainActivity extends Activity {
               if (!target.isFile() || !target.delete()) throw new IOException("Cannot delete entry");
               break;
             }
-            case "info": result = new JSONObject().put("platform", "Android").put("location", vault.getAbsolutePath()).put("version", "0.1.1"); break;
+            case "info": result = new JSONObject().put("platform", "Android").put("location", vault.getAbsolutePath()).put("version", "0.1.6"); break;
             case "import": case "export": {
               final byte[] payload = op.equals("export") ? read(file(request.getString("id"))).getBytes(StandardCharsets.UTF_8) : null;
               final String name = request.optString("id", "diary") + ".md";

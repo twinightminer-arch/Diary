@@ -43,13 +43,33 @@ test(`${process.env.DIARY_BROWSER_TEST ? 'Browser + real filesystem' : 'Electron
     await expect(page.locator('#tutorialSkipAll')).toBeVisible();
     await page.locator('#tutorialSkipAll').click();
     await expect(page.locator('.tutorial-layer')).toBeHidden();
+    // Manual replay starts the complete guide, while module skipping reaches
+    // the newly integrated VPN and pet steps without spawning a second guide.
+    await page.locator('#tutorialButton').click();
+    await expect(page.locator('#tutorialTitle')).toContainText('Diary 0.1.6');
+    for (let i = 0; i < 6; i++) await page.locator('#tutorialSkipModule').click();
+    await expect(page.locator('#tutorialModule')).toHaveText('学校 VPN');
+    await expect(page.locator('#vpnButton')).toHaveClass(/tutorial-target/);
+    for (const selector of ['.vpn-toolbar', '#vpnList', '.vpn-add', '.vpn-import-actions']) {
+      await page.locator('#tutorialNext').click();
+      await expect(page.locator(selector)).toHaveClass(/tutorial-target/);
+    }
+    await page.locator('#tutorialNext').click();
+    await expect(page.locator('#tutorialModule')).toHaveText('桌面宠物');
+    await expect(page.locator('#petButton')).toHaveClass(/tutorial-target/);
+    for (const selector of ['#petList', '#petToggle', '.pet-import', '.petdex-footer']) {
+      await page.locator('#tutorialNext').click();
+      await expect(page.locator(selector)).toHaveClass(/tutorial-target/);
+    }
+    await page.locator('#tutorialSkipAll').click();
+    await expect(page.locator('.tutorial-layer')).toBeHidden();
     await page.locator('#vpnButton').click();
     await page.locator('#vpnSearch').fill('清华');
     await expect(page.locator('.vpn-card')).toHaveCount(1);
     await expect(page.locator('.vpn-card')).toContainText('清华大学');
     await page.locator('#petButton').click();
     await expect(page.locator('.pet-card')).toContainText('Diary 小爪');
-    await expect(page.locator('#petdexLink')).toHaveAttribute('href', '#');
+    await expect(page.locator('#petdexLink')).toHaveAttribute('href', 'https://petdex.dev/zh');
     await page.locator('[data-view="diary"]').first().click();
     await expect(page.locator('#firstEntry')).toBeVisible();
     await page.locator('#firstEntry').click();
