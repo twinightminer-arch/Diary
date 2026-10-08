@@ -4,7 +4,9 @@ package app.diary.local;
 import android.app.Activity;
 import android.content.Intent;
 import android.graphics.Color;
+import android.graphics.Insets;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.database.Cursor;
 import android.provider.OpenableColumns;
@@ -12,6 +14,7 @@ import android.util.AtomicFile;
 import android.util.Base64;
 import android.webkit.*;
 import android.view.View;
+import android.view.WindowInsets;
 import org.json.*;
 import java.io.*;
 import java.net.HttpURLConnection;
@@ -37,9 +40,79 @@ public final class MainActivity extends Activity {
   private byte[] exportData;
   private static final int IMPORT = 101, EXPORT = 102, SOURCE_IMPORT = 103;
   private static final String ORIGIN = "https://appassets.androidplatform.net";
+  // Only files that actually ship inside the APK are served, and only with the
+  // three script/style types the shell knows how to hand to WebView. The list
+  // stays a path pattern rather than a fixed roster so that new pages (nested
+  // folders, dotted or upper-case names such as onboarding/content.zh-CN.js)
+  // keep working without silently 404-ing the whole ES module graph.
+  private static final java.util.regex.Pattern ASSET_PATH =
+      java.util.regex.Pattern.compile("^/(?:[A-Za-z0-9][A-Za-z0-9._-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*\\.(?:html|css|js|mjs)$");
   // Google OAuth redirect: reverse-DNS scheme derived from the Android client ID.
   private static final String GOOGLE_SCHEME = "com.googleusercontent.apps.933958043196-8otpn6ub49h2oo2agrdjocljl5p3559g";
   private String pendingOAuthUri;
+  // ---- 外链 / OAuth：一律走 Chrome Custom Tabs ----------------------------
+  // Google 封杀在 WebView 里做 OAuth（就是用裸浏览器打开 accounts.google.com 也
+  // 会被判 400 invalid_request），所以授权页必须由真正的浏览器承载。Custom Tabs
+  // 在系统浏览器进程里渲染但视觉上留在应用内：有自己的加载进度条、可以返回取消。
+  private androidx.browser.customtabs.CustomTabsSession customTabsSession;
+  private androidx.browser.customtabs.CustomTabsServiceConnection customTabsConnection;
+  private final android.os.Handler uiHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+  private Runnable oauthTimeoutWatchdog;
+
+  /** 挑一个支持 Custom Tabs 的浏览器；一个都没有就返回 null，由调用方降级。 */
+  private String customTabsPackage() {
+    try {
+      String chosen = androidx.browser.customtabs.CustomTabsClient.getPackageName(this, null);
+      return chosen;
+    } catch (Throwable ignored) { return null; }
+  }
+
+  /** 用 Custom Tabs 打开；没有可用浏览器时降级为系统选择器（只允许 https 处理器）。 */
+  private void openInBrowser(String url, boolean isOAuth) {
+    final Uri uri = Uri.parse(url);
+    runOnUiThread(() -> {
+      String pkg = customTabsPackage();
+      if (pkg != null) {
+        try {
+          androidx.browser.customtabs.CustomTabsIntent.Builder builder =
+              new androidx.browser.customtabs.CustomTabsIntent.Builder(customTabsSession);
+          builder.setShowTitle(true)
+                 .setToolbarColor(Color.rgb(248, 247, 244))
+                 .setNavigationBarColor(Color.rgb(248, 247, 244))
+                 .setStartAnimations(this, android.R.anim.fade_in, android.R.anim.fade_out)
+                 .setExitAnimations(this, android.R.anim.fade_in, android.R.anim.fade_out);
+          androidx.browser.customtabs.CustomTabsIntent intent = builder.build();
+          intent.intent.setPackage(pkg);
+          intent.launchUrl(this, uri);
+          if (isOAuth) armOAuthWatchdog();
+          return;
+        } catch (Throwable ignored) { /* 落到下面的降级分支 */ }
+      }
+      // 降级：没有 Custom Tabs 也要能打开，且必须让用户选（避免直接掉进某个卡的浏览器）。
+      Intent view = new Intent(Intent.ACTION_VIEW, uri);
+      view.addCategory(Intent.CATEGORY_BROWSABLE);
+      Intent chooser = Intent.createChooser(view, isOAuth ? "用浏览器完成 Google 授权" : "打开链接");
+      try {
+        startActivity(chooser);
+        if (isOAuth) armOAuthWatchdog();
+      } catch (android.content.ActivityNotFoundException missing) {
+        toast("这台设备上没有可用的浏览器，无法打开链接");
+      }
+    });
+  }
+
+  /** 授权页开太久就给个说法，不要让用户对着一个没反应的界面等。 */
+  private void armOAuthWatchdog() {
+    if (oauthTimeoutWatchdog != null) uiHandler.removeCallbacks(oauthTimeoutWatchdog);
+    oauthTimeoutWatchdog = () -> {
+      if (pendingOAuthUri != null || !loginFinished) toast("Google 授权还在等待中；如果浏览器没反应，可返回重试或在设置里手动粘贴授权码。");
+    };
+    uiHandler.postDelayed(oauthTimeoutWatchdog, 45_000);
+  }
+  private boolean loginFinished = true;
+  private void toast(String message) {
+    runOnUiThread(() -> android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_LONG).show());
+  }
 
   @Override public void onCreate(Bundle state) {
     super.onCreate(state);
@@ -51,10 +124,22 @@ public final class MainActivity extends Activity {
     if (!vault.isDirectory() && !vault.mkdirs()) throw new IllegalStateException("Cannot create journal directory");
     media = new File(getFilesDir(), "media");
     if (!media.isDirectory() && !media.mkdirs()) throw new IllegalStateException("Cannot create media directory");
+    // 发布版不开启 WebView 远程调试（曾为排查白屏临时打开，已关闭）。
     web = new WebView(this);
     web.setBackgroundColor(Color.rgb(248, 247, 244));
     web.setOnApplyWindowInsetsListener((view, insets) -> {
-      view.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(), insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
+      // getSystemWindowInset*() 是废弃接口：在 API 30+ 及鸿蒙的 WebView 上取到的
+      // 值经常不对，页面顶部会被状态栏压住。改用 systemBars 取真实系统栏高度。
+      int left, top, right, bottom;
+      if (Build.VERSION.SDK_INT >= 30) {
+        Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+        left = bars.left; top = bars.top; right = bars.right; bottom = bars.bottom;
+      } else {
+        left = insets.getSystemWindowInsetLeft(); top = insets.getSystemWindowInsetTop();
+        right = insets.getSystemWindowInsetRight(); bottom = insets.getSystemWindowInsetBottom();
+      }
+      int extraTop = Math.round(8 * getResources().getDisplayMetrics().density);
+      view.setPadding(left, top + extraTop, right, bottom);
       return insets.consumeSystemWindowInsets();
     });
     WebSettings settings = web.getSettings();
@@ -66,12 +151,37 @@ public final class MainActivity extends Activity {
     settings.setSupportMultipleWindows(false);
     web.addJavascriptInterface(new Bridge(), "NativeDiary");
     web.setWebViewClient(new WebViewClient() {
-      @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) { return true; }
+      @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+        // 以前这里无条件 return true —— 结果「查看详情」这类外链被吞掉、既不跳转
+        // 也不报错，界面就停在「正在联网查询报名官网…」。现在按来源分流：
+        // 应用自己的资源留在 WebView 内（交给 shouldInterceptRequest 读 assets），
+        // 其余一切外部链接交给浏览器。
+        Uri uri = request.getUrl();
+        if (uri == null) return false;
+        String scheme = uri.getScheme() == null ? "" : uri.getScheme();
+        String host = uri.getHost();
+        String path = uri.getPath();
+        boolean ownAsset = "https".equals(scheme) && ORIGIN.equals("https://" + host)
+            && path != null && ASSET_PATH.matcher(path).matches();
+        if (ownAsset) return false;
+        if ("http".equals(scheme) || "https".equals(scheme)) { openInBrowser(uri.toString(), false); return true; }
+        // OAuth 回调用的是反向域名 scheme，由 onNewIntent() 接管，别让 WebView 去加载。
+        if (GOOGLE_SCHEME.equals(scheme)) return true;
+        // intent://、market:// 等：交给系统，装了对应应用就跳，没装就提示。
+        try {
+          Intent intent = Intent.parseUri(uri.toString(), Intent.URI_INTENT_SCHEME);
+          if (intent.resolveActivity(getPackageManager()) != null) { startActivity(intent); return true; }
+          String fallback = intent.getStringExtra("browser_fallback_url");
+          if (fallback != null) { openInBrowser(fallback, false); return true; }
+          toast("没有应用可以打开这个链接");
+        } catch (Throwable ignored) { toast("无法识别的链接：" + uri); }
+        return true;
+      }
       @Override public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
         Uri uri = request.getUrl();
         String path = uri.getPath();
         if ("https".equals(uri.getScheme()) && "appassets.androidplatform.net".equals(uri.getHost()) &&
-            path != null && path.matches("/(index\\.html|app\\.css|(?:app|i18n|security|storage)/[a-z-]+\\.js|vendor/(?:pdf(?:\\.worker)?\\.mjs|fflate\\.js))")) {
+            path != null && !path.contains("..") && ASSET_PATH.matcher(path).matches()) {
           try {
             String mime = (path.endsWith(".js") || path.endsWith(".mjs")) ? "application/javascript" : path.endsWith(".css") ? "text/css" : "text/html";
             return new WebResourceResponse(mime, "UTF-8", getAssets().open(path.substring(1)));
@@ -239,7 +349,7 @@ public final class MainActivity extends Activity {
               if (!target.isFile() || !target.delete()) throw new IOException("Cannot delete entry");
               break;
             }
-            case "info": result = new JSONObject().put("platform", "Android").put("location", vault.getAbsolutePath()).put("version", "0.1.8"); break;
+            case "info": result = new JSONObject().put("platform", "Android").put("location", vault.getAbsolutePath()).put("version", "0.1.9"); break;
             case "import": case "export": {
               final byte[] payload = op.equals("export") ? read(file(request.getString("id"))).getBytes(StandardCharsets.UTF_8) : null;
               final String name = request.optString("id", "diary") + ".md";
@@ -420,7 +530,13 @@ public final class MainActivity extends Activity {
             case "openExternal": {
               String url = request.optString("url", "");
               if (!url.startsWith("https://")) throw new IOException("Refusing to open a non-https URL");
-              runOnUiThread(() -> startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))));
+              // OAuth 授权页（accounts.google.com 等）走 Custom Tabs：Google 不允许
+              // 在 WebView 里登录，裸 WebView 一律 400 invalid_request。
+              boolean oauth = url.contains("accounts.google.com") || url.contains("login.microsoftonline.com")
+                  || url.contains("oauth2") || url.contains("/auth");
+              if (oauth) loginFinished = false;   // 由 openInBrowser() 里的看门狗盯着
+              openInBrowser(url, oauth);
+              result = new JSONObject().put("ok", true);
               break;
             }
             case "exit": runOnUiThread(() -> finish()); break;
@@ -481,6 +597,8 @@ public final class MainActivity extends Activity {
     }
   }
   private void relayOAuth(String uri) {
+    loginFinished = true;
+    if (oauthTimeoutWatchdog != null) uiHandler.removeCallbacks(oauthTimeoutWatchdog);
     runOnUiThread(() -> {
       if (!isDestroyed()) web.evaluateJavascript("window.__diaryOAuthRedirect&&window.__diaryOAuthRedirect(" + JSONObject.quote(uri) + ")", null);
     });

@@ -33,7 +33,7 @@ export function validateUsername(config: HostConfig, username: string, exceptId?
 }
 
 export function validatePassword(passcode: string, confirmation?: string): string {
-  if (typeof passcode !== 'string' || passcode.length < 6) throw new Error('密码至少 6 位');
+  if (typeof passcode !== 'string' || passcode.length < 8) throw new Error('密码至少 8 位');
   if (confirmation !== undefined && passcode !== confirmation) throw new Error('两次输入的密码不一致');
   return passcode;
 }

@@ -474,11 +474,20 @@ $('authSubmit').onclick = action(async () => {
   const remember = ($('authRemember') as HTMLInputElement).checked;
   if (!username) { toast('请输入用户名'); return; }
   if (!passcode) { toast('请输入密码'); return; }
-  await call({ op: 'account:signIn', username, passcode, remember });
-  await refreshSnapshot();
-  hideLock(); await loadConfig(); await refresh();
-  startOnboardingAfterEntry(true);
-  toast('登录成功');
+  // 密码校验要跑 PBKDF2，手机上不是瞬时的：给个进行中的状态，否则用户只会以为
+  // 点不动了。（action() 的全局忙锁已经挡住了重复点击。）
+  const button = $<HTMLButtonElement>('authSubmit');
+  const label = button.textContent;
+  button.disabled = true; button.textContent = '验证中…';
+  try {
+    await call({ op: 'account:signIn', username, passcode, remember });
+    await refreshSnapshot();
+    hideLock(); await loadConfig(); await refresh();
+    startOnboardingAfterEntry(true);
+    toast('登录成功');
+  } finally {
+    button.disabled = false; button.textContent = label;
+  }
 });
 $('authPasscode').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); $('authSubmit').click(); } });
 
@@ -487,7 +496,7 @@ $('offlineCreate').onclick = action(async () => {
   const r = await modal('创建本地离线账户', '设置一个专属用户名和密码。同一台设备上的每个用户互相独立，资料互不相见。', [
     { name: 'username', label: '用户名（2-20 位中英文/数字/下划线）', type: 'text' },
     { name: 'nickname', label: '昵称（可选）', type: 'text', required: false },
-    { name: 'next', label: '密码（至少 6 位）' },
+    { name: 'next', label: '密码（至少 8 位）' },
     { name: 'confirmation', label: '确认密码' },
   ]);
   if (!r) return;
@@ -509,7 +518,7 @@ $('authForgot').onclick = action(async () => {
   const pick = await modal('找回密码', '选择要找回的账户，然后回答密保问题重置密码。', [
     { name: 'id', label: '账户', options },
     { name: 'answer', label: '密保答案' },
-    { name: 'next', label: '新密码（至少 6 位）' },
+    { name: 'next', label: '新密码（至少 8 位）' },
     { name: 'confirmation', label: '确认新密码' },
   ]);
   if (!pick) return;
@@ -684,6 +693,14 @@ async function openAiModels(): Promise<void> {
   paintApiPage(cfg);
   paintCustomPage(cfg);
   paintWorkbuddyPage(cfg);
+  // The WorkBuddy plugin needs the desktop host, so hide its tab instead of
+  // offering a switch that can never connect on a phone.
+  if (window.NativeDiary) {
+    const workbuddyTab = $('aiModelTabs').querySelector<HTMLElement>('[data-ai-tab="workbuddy"]');
+    if (workbuddyTab) workbuddyTab.hidden = true;
+    $('aiModelPanel').querySelector<HTMLElement>('[data-ai-panel="workbuddy"]')!.hidden = true;
+    $('aiModelPanel').querySelector<HTMLElement>('[data-ai-panel="api"]')!.querySelector<HTMLElement>('.hint')!.textContent = '填写模型服务地址、模型名和 API 密钥。密钥保存在此设备的应用数据中。';
+  }
   $('aiModelPanel').hidden = false;
 }
 
@@ -722,7 +739,9 @@ async function loadConfig() {
   renderBackgroundLibrary(backgroundLibrary, background);
   renderPermissionState(cfg);
   applyPluginVisibility(cfg);
-  await renderGallery();
+  // 图库不是打开设置的前提：媒体一多，逐个建 <img>/<video> 会让 WebView 主线程
+  // 忙上好几秒（手机上表现为「点设置就卡死」）。让它自己慢慢填，面板立刻可用。
+  void renderGallery();
 }
 
 /**
@@ -1235,12 +1254,19 @@ function renderBackgroundPanel(bg: BackgroundState): void {
   if (!wallpapersLoaded) { wallpapersLoaded = true; void loadWallpapers(); }
 }
 /** Renders the imported-media gallery: click a tile to insert it, × to delete it. */
+let galleryRun = 0;
 async function renderGallery() {
+  const run = ++galleryRun;
   const list = await call<{ id: string; name: string; mime: string; size: number }[]>({ op: 'media:list' });
   const gallery = $('mediaGallery');
   gallery.replaceChildren();
   gallery.hidden = list.length === 0;
-  for (const item of list) {
+  // 一次建完所有瓦片会让 WebView 同时发起几十个文件读取，主线程被 IO 和解码占满
+  // ——手机上的表现就是设置页「突然卡死」。分批建、批与批之间把控制权交还浏览器。
+  const BATCH = 8;
+  for (const [index, item] of list.entries()) {
+    if (run !== galleryRun) return;            // 期间又刷新过一次，放弃这次旧渲染
+    if (index > 0 && index % BATCH === 0) await new Promise(requestAnimationFrame);
     const tile = document.createElement('button');
     tile.title = `${item.name} · ${Math.max(1, Math.round(item.size / 1024))} KB`;
     if (item.mime.startsWith('image') || item.mime.startsWith('video')) {
@@ -1273,7 +1299,8 @@ async function renderGallery() {
   }
 }
 function openSettings() { $('settingsPanel').hidden = false; }
-$('settings').onclick = action(async () => { await loadConfig(); openSettings(); });
+// 先开面板再取数据：loadConfig() 要走好几个桥调用，等在前面会让「设置」看起来没反应。
+$('settings').onclick = action(async () => { openSettings(); await loadConfig(); });
 $('settingsClose').onclick = () => { $('settingsPanel').hidden = true; };
 // Scoped to the settings panel: the AI-model screen owns its own tabs.
 {
@@ -1349,7 +1376,7 @@ $('cfgLocale').onchange = () => { locale.setLocale($<HTMLSelectElement>('cfgLoca
 $('accountChangePwd').onclick = action(async () => {
   const r = await modal('修改密码', '输入原密码后设置新密码。', [
     { name: 'passcode', label: '原密码' },
-    { name: 'next', label: '新密码（至少 6 位）' },
+    { name: 'next', label: '新密码（至少 8 位）' },
     { name: 'confirmation', label: '确认新密码' },
   ]);
   if (!r) return;
@@ -1791,6 +1818,15 @@ function pluginRow(name: string, detail: string, badge: string, badgeClass: stri
 
 async function openPluginManager(): Promise<void> {
   const list = await call<PluginList>({ op: 'plugin:list' });
+  // External plugins live in a desktop folder; on a phone the manager is a
+  // switchboard for built-in features instead.
+  if (window.NativeDiary) {
+    $('externalPluginList').previousElementSibling!.textContent = '';
+    $('externalPluginList').hidden = true;
+    $('pluginOpenDir').hidden = true;
+    $('pluginRescan').hidden = true;
+    $('pluginPanel').querySelector<HTMLElement>('.settings-body > .hint')!.textContent = '管理手机端内置功能。关闭功能后，其入口会从侧边栏隐藏，数据仍会保留。';
+  }
   const builtinHost = $('builtinPluginList');
   builtinHost.replaceChildren();
   for (const plugin of list.builtin) {
@@ -1829,7 +1865,7 @@ async function openPluginManager(): Promise<void> {
   for (const problem of list.errors) {
     externalHost.append(pluginRow(problem.file.split(/[\\/]/).pop() ?? problem.file, problem.message, '加载失败', 'bad'));
   }
-  $('pluginDirHint').textContent = `插件目录：${list.directory}`;
+  $('pluginDirHint').textContent = list.directory ? `插件目录：${list.directory}` : '';
   $('pluginPanel').hidden = false;
 }
 $('pluginManage').onclick = action(openPluginManager);
@@ -1994,8 +2030,11 @@ document.addEventListener('pointerdown', (event) => {
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') $('moreMenu').hidden = true;
 });
-$('openSidebar').onclick = () => document.body.classList.add('sidebar-open');
+$('openSidebar').onclick = () => document.body.classList.toggle('sidebar-open');
 $('closeSidebar').onclick = () => document.body.classList.remove('sidebar-open');
+// Tapping the dimmed area behind the drawer dismisses it, the way a native
+// navigation drawer does; the button itself toggles so a second tap closes.
+$('sidebarScrim').onclick = () => document.body.classList.remove('sidebar-open');
 $('theme').onclick = () => { document.body.classList.toggle('dark'); localStorage.setItem('diary.dark', String(document.body.classList.contains('dark'))); };
 $('encrypt').onclick = action(async () => {
   if (!current) return;

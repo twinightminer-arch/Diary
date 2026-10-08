@@ -56,13 +56,28 @@ function native(request: Request): Promise<unknown> {
 // The APK has no Node host, so settings that need no file system live in
 // localStorage, while batch encryption reuses the shared WebCrypto module so
 // ciphertext stays byte-compatible with the desktop build.
-const PBKDF2_ITERATIONS = 310_000;
-const DEFAULT_PROVIDERS: Record<string, { baseUrl: string; model: string }> = {
+// 31 万次迭代是桌面端的取值：桌面 CPU 上约 0.3s，但手机 WebView（尤其鸿蒙
+// 4.2 自带的旧 WebView）要把这段 PBKDF2 跑成几秒级，表现为「离线登录转圈很久
+// 甚至像登录不进去」。移动端单独降到 12 万次 —— 对本地离线口令仍是足够硬的
+// 慢哈希，而登录耗时回到几百毫秒。
+const PBKDF2_ITERATIONS = 120_000;
+// 老账户的哈希是用旧迭代数算出来的：迭代数是哈希输入的一部分，改常量会让存量
+// 账户全部登不上。所以按账户记录各自的迭代数，登录后静默升级到新值。
+const LEGACY_PBKDF2_ITERATIONS = 310_000;
+const DEFAULT_PROVIDERS: Record<string, { baseUrl: string; model: string; label?: string; custom?: boolean }> = {
   openai: { baseUrl: 'https://api.openai.com/v1', model: 'gpt-4o-mini' },
   deepseek: { baseUrl: 'https://api.deepseek.com/v1', model: 'deepseek-chat' },
 };
-type AiSettings = { activeProvider: string; providers: Record<string, { baseUrl: string; model: string }>; keys: Record<string, string> };
+type AiSettings = { activeProvider: string; providers: Record<string, { baseUrl: string; model: string; label?: string; custom?: boolean }>; keys: Record<string, string> };
 const defaultAi = (): AiSettings => ({ activeProvider: 'openai', providers: structuredClone(DEFAULT_PROVIDERS), keys: {} });
+/** Android ships no external plugin folder; the manager toggles these instead. */
+const MOBILE_PLUGINS = [
+  { id: 'wallpaper', name: '壁纸与背景', description: '图片与背景设置。', version: '1.0.0' },
+  { id: 'weather', name: '实时天气', description: '首页天气信息。', version: '1.0.0' },
+  { id: 'ai-agent', name: 'AI 助手', description: 'AI 问答、搜索与写作。', version: '1.0.0' },
+  { id: 'campus', name: '办事指南', description: '校园办事清单与进度。', version: '1.0.0' },
+  { id: 'competition', name: '竞赛中心', description: '竞赛目录与日历。', version: '1.0.0' },
+] as const;
 
 // ---- Android local account model (mirrors the desktop HostConfig) ----------
 interface MobileUser {
@@ -70,6 +85,10 @@ interface MobileUser {
   salt: string; hash: string; googleId: string | null; googleEmail: string | null;
   recoveryQuestion: string | null; recoverySalt: string | null; recoveryHash: string | null;
   createdAt: number; lastLoginAt: number | null; autoLogin: boolean;
+  /** PBKDF2 迭代数。缺省的老账户按 LEGACY_PBKDF2_ITERATIONS 处理。 */
+  iter?: number;
+  /** 密保答案哈希用的迭代数，缺省同上。 */
+  recoveryIter?: number;
 }
 interface MobileAccount {
   users: MobileUser[];
@@ -81,12 +100,25 @@ const USERNAME_PATTERN = /^[A-Za-z0-9_一-龥]{2,20}$/;
 function loadAccount(): MobileAccount { return load<MobileAccount>('account', emptyMobileAccount()); }
 function saveAccount(account: MobileAccount): void { store('account', account); }
 function newSalt(): Uint8Array { return crypto.getRandomValues(new Uint8Array(16)); }
-async function hashPassword(passcode: string, salt: Uint8Array): Promise<string> {
-  const key = await derivePasscode(passcode, salt);
+async function hashPassword(passcode: string, salt: Uint8Array, iterations = PBKDF2_ITERATIONS): Promise<string> {
+  const key = await derivePasscode(passcode, salt, iterations);
   return toBase64(Uint8Array.from(key.match(/../g)!.map(byte => parseInt(byte, 16))));
 }
+function iterationsFor(user: MobileUser): number { return user.iter ?? LEGACY_PBKDF2_ITERATIONS; }
 async function verifyPassword(passcode: string, user: MobileUser): Promise<boolean> {
-  return safeEqual(await hashPassword(passcode, fromBase64(user.salt)), user.hash);
+  const salt = fromBase64(user.salt);
+  return safeEqual(await hashPassword(passcode, salt, iterationsFor(user)), user.hash);
+}
+/** 老账户登录成功后把哈希重算成当前迭代数，下一次登录就不再走旧的那次慢哈希。 */
+async function upgradePasswordHash(passcode: string, user: MobileUser, account: MobileAccount): Promise<void> {
+  if (iterationsFor(user) === PBKDF2_ITERATIONS) return;
+  const salt = newSalt();
+  user.salt = toBase64(salt);
+  user.hash = await hashPassword(passcode, salt);
+  user.iter = PBKDF2_ITERATIONS;
+  saveAccount(account);
+  // 密保答案的明文只有用户自己知道，登录时拿不到，所以 recoveryHash 不在这里
+  // 迁移：它继续按 recoveryIter 验证，用户下次重设密保时自然切到新迭代数。
 }
 function checkUsername(account: MobileAccount, username: string, exceptId?: string): string {
   const name = (username ?? '').trim();
@@ -95,7 +127,8 @@ function checkUsername(account: MobileAccount, username: string, exceptId?: stri
   return name;
 }
 function checkPassword(passcode: string, confirmation?: string): string {
-  if (typeof passcode !== 'string' || passcode.length < 6) throw new Error('密码至少 6 位');
+  // 8 位，和界面上所有提示文案保持一致（曾经校验 6 位而文案写 8 位）。
+  if (typeof passcode !== 'string' || passcode.length < 8) throw new Error('密码至少 8 位');
   if (confirmation !== undefined && passcode !== confirmation) throw new Error('两次输入的密码不一致');
   return passcode;
 }
@@ -113,16 +146,38 @@ function fromBase64(value: string): Uint8Array {
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
 }
-async function derivePasscode(passcode: string, salt: Uint8Array): Promise<string> {
-  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(passcode), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: salt as BufferSource, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' }, key, 256);
-  return Array.from(new Uint8Array(bits)).map(byte => byte.toString(16).padStart(2, '0')).join('');
+async function derivePasscode(passcode: string, salt: Uint8Array, iterations = PBKDF2_ITERATIONS): Promise<string> {
+  // 某些定制 WebView 上 crypto.subtle 是缺的；缺了就明确报错，不要让登录界面
+  // 一直转圈，用户看不出到底是密码错还是环境不支持。
+  if (!globalThis.crypto?.subtle) throw new Error('当前环境不支持 WebCrypto，无法校验密码');
+  try {
+    const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(passcode), 'PBKDF2', false, ['deriveBits']);
+    const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: salt as BufferSource, iterations, hash: 'SHA-256' }, key, 256);
+    return Array.from(new Uint8Array(bits)).map(byte => byte.toString(16).padStart(2, '0')).join('');
+  } catch (error) {
+    throw new Error(error instanceof Error && error.message.includes('WebCrypto') ? error.message : `密码校验失败：${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 function safeEqual(left: string, right: string): boolean {
   if (left.length !== right.length) return false;
   let diff = 0;
   for (let i = 0; i < left.length; i++) diff |= left.charCodeAt(i) ^ right.charCodeAt(i);
   return diff === 0;
+}
+// The Android host keeps no config file, so the network/location switches and
+// the saved coordinates live in localStorage and travel back via config:get.
+const defaultPermissions = (): { network: boolean; location: boolean } => ({ network: true, location: false });
+const defaultLocation = (): { mode: 'auto' | 'manual'; lat: number | null; lon: number | null; label: string } => ({ mode: 'manual', lat: null, lon: null, label: '' });
+/** Host weather only returns a Chinese summary; pick the matching glyph. */
+function weatherGlyph(description: string): string {
+  if (description.includes('雷')) return '⛈';
+  if (description.includes('雪')) return '❄';
+  if (description.includes('雨')) return '🌧';
+  if (description.includes('雾')) return '🌫';
+  if (description.includes('阴')) return '☁';
+  if (description.includes('多云')) return '⛅';
+  if (description.includes('晴')) return '☀';
+  return '🌤';
 }
 function mobileConfig() {
   const settings = load<AiSettings>('ai', defaultAi());
@@ -131,7 +186,7 @@ function mobileConfig() {
   const current = account.session.userId ? account.users.find(u => u.id === account.session.userId) ?? null : null;
   return {
     activeProvider: settings.activeProvider,
-    providers: Object.entries(providers).map(([id, entry]) => ({ id, baseUrl: entry.baseUrl, model: entry.model, hasKey: Boolean(settings.keys[id]), needsKey: true })),
+    providers: Object.entries(providers).map(([id, entry]) => ({ id, label: entry.label ?? id, baseUrl: entry.baseUrl, model: entry.model, models: [], custom: Boolean(entry.custom), hasKey: Boolean(settings.keys[id]), needsKey: true })),
     profile: load<{ username: string; avatar: string | null; signature: string }>('profile', { username: '', avatar: null, signature: '' }),
     media: load<{ background: string | null; bgm: string | null }>('media', { background: null, bgm: null }),
     users: account.users.map(u => ({
@@ -142,6 +197,10 @@ function mobileConfig() {
     remember: account.session.remember,
     google: account.google,
     oauthClients: load<Record<string, string>>('oauthClients', {}),
+    permissions: load('permissions', defaultPermissions()),
+    location: load('location', defaultLocation()),
+    builtinPlugins: MOBILE_PLUGINS.map(plugin => ({ ...plugin, kind: 'builtin', enabled: load<Record<string, boolean>>('plugins', {})[plugin.id] !== false })),
+    plugins: [], pluginErrors: [], pluginDirectory: '',
   };
 }
 // Android uses the same TypeScript crypto and Markdown format over private native files.
@@ -197,6 +256,37 @@ async function mobile(request: Request): Promise<unknown> {
   if (op === 'changePasscode') return write(await changePasscode(await file(), passcode!, request.next!, request.confirmation!));
   // Settings that touch no file stay in localStorage.
   if (op === 'config:get') return mobileConfig();
+  // Android scans no wallpaper folder and owns no music library, so the
+  // settings screen gets empty listings rather than a failed native call.
+  if (op === 'background:list' || op === 'music:list') return [];
+  if (op === 'plugin:list') return { builtin: mobileConfig().builtinPlugins, external: [], errors: [], directory: '' };
+  if (op === 'plugin:toggle') {
+    if (!MOBILE_PLUGINS.some(plugin => plugin.id === request.pluginId)) throw new Error('安卓端不支持该外部插件');
+    const plugins = load<Record<string, boolean>>('plugins', {});
+    plugins[request.pluginId!] = request.enabled !== false;
+    store('plugins', plugins);
+    return mobileConfig();
+  }
+  if (op === 'provider:create') {
+    const wanted = id?.trim() ?? '';
+    if (!/^[A-Za-z0-9._-]{1,40}$/.test(wanted)) throw new Error('名称只能用字母、数字、点、下划线和连字符（最多 40 个字符）');
+    const settings = load<AiSettings>('ai', defaultAi());
+    if (wanted in DEFAULT_PROVIDERS || wanted in settings.providers) throw new Error('这个模型名称已被占用');
+    settings.providers[wanted] = { baseUrl: request.baseUrl?.trim() ?? '', model: request.model?.trim() ?? '', label: request.label?.trim() || wanted, custom: true };
+    if (request.next) settings.keys[wanted] = request.next;
+    settings.activeProvider = wanted;
+    store('ai', settings);
+    return mobileConfig();
+  }
+  if (op === 'provider:delete') {
+    const settings = load<AiSettings>('ai', defaultAi());
+    if (!id || !settings.providers[id]?.custom) throw new Error('找不到可删除的自定义模型');
+    delete settings.providers[id];
+    delete settings.keys[id];
+    if (settings.activeProvider === id) settings.activeProvider = 'openai';
+    store('ai', settings);
+    return mobileConfig();
+  }
   if (op === 'config:setProvider') {
     if (!id) throw new Error('Provider id required');
     const settings = load<AiSettings>('ai', defaultAi());
@@ -224,7 +314,7 @@ async function mobile(request: Request): Promise<unknown> {
     const salt = newSalt();
     const user: MobileUser = {
       id: crypto.randomUUID(), username, displayName: (request.displayName ?? username).trim() || username, avatar: null,
-      salt: toBase64(salt), hash: await hashPassword(chosen, salt),
+      salt: toBase64(salt), hash: await hashPassword(chosen, salt), iter: PBKDF2_ITERATIONS,
       googleId: null, googleEmail: null, recoveryQuestion: null, recoverySalt: null, recoveryHash: null,
       createdAt: Date.now(), lastLoginAt: Date.now(), autoLogin: Boolean(request.remember),
     };
@@ -238,11 +328,15 @@ async function mobile(request: Request): Promise<unknown> {
     const account = loadAccount();
     const user = account.users.find(u => u.username.toLowerCase() === String(request.username ?? '').trim().toLowerCase());
     if (!user) throw new Error('用户不存在');
-    if (!(await verifyPassword(String(request.passcode ?? ''), user))) throw new Error('密码错误');
+    const passcode = String(request.passcode ?? '');
+    if (!(await verifyPassword(passcode, user))) throw new Error('密码错误');
     user.lastLoginAt = Date.now();
     if (request.remember) user.autoLogin = true;
     account.session = { userId: user.id, remember: Boolean(request.remember) };
     saveAccount(account);
+    // 存量账户第一次登录仍要走一次旧的 31 万次迭代，登录成功后立刻按新迭代数
+    // 重算，之后每次登录都是几百毫秒。
+    await upgradePasswordHash(passcode, user, account);
     store('profile', { ...load('profile', { username: '', avatar: null, signature: '' }), username: user.displayName, avatar: user.avatar });
     return mobileConfig();
   }
@@ -261,7 +355,7 @@ async function mobile(request: Request): Promise<unknown> {
     if (!user) throw new Error('Not signed in');
     if (!(await verifyPassword(String(request.passcode ?? ''), user))) throw new Error('原密码错误');
     const next = checkPassword(String(request.next ?? ''), typeof request.confirmation === 'string' ? request.confirmation : undefined);
-    const salt = newSalt(); user.salt = toBase64(salt); user.hash = await hashPassword(next, salt);
+    const salt = newSalt(); user.salt = toBase64(salt); user.hash = await hashPassword(next, salt); user.iter = PBKDF2_ITERATIONS;
     saveAccount(account); return { ok: true };
   }
   if (op === 'account:setRecovery') {
@@ -274,15 +368,17 @@ async function mobile(request: Request): Promise<unknown> {
     const salt = newSalt();
     user.recoveryQuestion = question; user.recoverySalt = toBase64(salt);
     user.recoveryHash = await hashPassword(answer.toLowerCase(), salt);
+    user.recoveryIter = PBKDF2_ITERATIONS;
     saveAccount(account); return mobileConfig();
   }
   if (op === 'account:recover') {
     const account = loadAccount();
     const user = account.users.find(u => u.id === String(request.id ?? ''));
     if (!user || !user.recoveryHash) throw new Error('该账户未设置密保问题');
-    if (!safeEqual(await hashPassword(String(request.answer ?? '').trim().toLowerCase(), fromBase64(user.recoverySalt!)), user.recoveryHash)) throw new Error('密保答案不正确');
+    // 密保哈希按它自己当时记录的迭代数校验，老账户不会因为这次改动而答不对。
+    if (!safeEqual(await hashPassword(String(request.answer ?? '').trim().toLowerCase(), fromBase64(user.recoverySalt!), user.recoveryIter ?? LEGACY_PBKDF2_ITERATIONS), user.recoveryHash)) throw new Error('密保答案不正确');
     const next = checkPassword(String(request.next ?? ''), typeof request.confirmation === 'string' ? request.confirmation : undefined);
-    const salt = newSalt(); user.salt = toBase64(salt); user.hash = await hashPassword(next, salt);
+    const salt = newSalt(); user.salt = toBase64(salt); user.hash = await hashPassword(next, salt); user.iter = PBKDF2_ITERATIONS;
     saveAccount(account); return { ok: true };
   }
   if (op === 'media:setBackground' || op === 'media:setBgm') {
@@ -331,7 +427,7 @@ async function mobile(request: Request): Promise<unknown> {
         const passcode = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
         user = {
           id: crypto.randomUUID(), username, displayName: result.name || username, avatar: picture,
-          salt: toBase64(salt), hash: await hashPassword(passcode, salt),
+          salt: toBase64(salt), hash: await hashPassword(passcode, salt), iter: PBKDF2_ITERATIONS,
           googleId, googleEmail: googleId, recoveryQuestion: null, recoverySalt: null, recoveryHash: null,
           createdAt: Date.now(), lastLoginAt: Date.now(), autoLogin: true,
         };
@@ -348,6 +444,60 @@ async function mobile(request: Request): Promise<unknown> {
       return { ok: true, email: googleId, name: user.displayName, picture: user.avatar, userId: user.id };
     }
     return result;
+  }
+  // Permission switches and the saved coordinates: the settings screen reads
+  // both back through config:get, and the weather panel depends on them.
+  if (op === 'permission:set') {
+    const permissions = load('permissions', defaultPermissions());
+    if (typeof request.network === 'boolean') permissions.network = request.network;
+    if (typeof request.location === 'boolean') permissions.location = request.location;
+    store('permissions', permissions);
+    return mobileConfig();
+  }
+  if (op === 'location:set') {
+    const location = load('location', defaultLocation());
+    if (request.mode === 'auto') location.mode = 'auto';
+    else if (request.mode === 'manual') location.mode = 'manual';
+    if (typeof request.lat === 'number' && Number.isFinite(request.lat)) location.lat = request.lat;
+    if (typeof request.lon === 'number' && Number.isFinite(request.lon)) location.lon = request.lon;
+    if (typeof request.label === 'string') location.label = request.label;
+    store('location', location);
+    return mobileConfig();
+  }
+  // Home-panel weather. The host only exposes a raw Open-Meteo reading, so it
+  // is shaped into the same report the desktop builds; fields the host cannot
+  // supply stay null and the card prints them as a dash.
+  if (op === 'weather:now') {
+    const permissions = load('permissions', defaultPermissions());
+    const location = load('location', defaultLocation());
+    if (!permissions.network)
+      return { ok: false, reason: 'offline', message: '联网已关闭。打开「设置 → 联网与定位」的联网开关即可显示实时天气。' };
+    if (typeof location.lat !== 'number' || typeof location.lon !== 'number')
+      return { ok: false, reason: 'noposition', message: '还没有位置。打开「设置 → 联网与定位」填写经纬度后即可显示天气。' };
+    try {
+      const raw = await native({ op: 'web:weather', lat: location.lat, lon: location.lon }) as { tempC: number; humidity: number | null; description: string };
+      let place = location.label.trim();
+      if (!place) {
+        const geo = await native({ op: 'web:geocode', lat: location.lat, lon: location.lon }).catch(() => null) as { city?: string; country?: string } | null;
+        place = [geo?.city, geo?.country].filter(Boolean).join(' · ');
+      }
+      const description = String(raw?.description ?? '');
+      const now = new Date();
+      const hour = now.getHours();
+      return {
+        ok: true, lat: location.lat, lon: location.lon, place,
+        weather: {
+          tempC: Number(raw?.tempC) || 0, apparentC: null, code: 0, description, icon: weatherGlyph(description),
+          humidity: typeof raw?.humidity === 'number' ? raw.humidity : null,
+          windKmh: null, windDir: null, windDirText: '', windScale: '', gustKmh: null,
+          pressure: null, precipitation: null, cloudCover: null, uvIndex: null, visibilityKm: null,
+          isDay: hour >= 6 && hour < 18, observedAt: now.toISOString(),
+        },
+        air: null, fetchedAt: now.toISOString(),
+      };
+    } catch (error) {
+      return { ok: false, reason: 'error', message: error instanceof Error ? error.message : String(error) };
+    }
   }
   // Network calls are host-only; carry the saved provider settings down with them.
   if (op === 'agent:compose' || op === 'agent:illustrate') {

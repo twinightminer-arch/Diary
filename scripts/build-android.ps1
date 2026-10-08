@@ -2,7 +2,9 @@ param([Parameter(Mandatory=$true)][string]$Sdk, [Parameter(Mandatory=$true)][str
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Push-Location $root
-$build = 'android-build'
+# Staging lives under %TEMP% so every run starts clean without a delete step
+# and the project tree stays free of build scratch files.
+$build = Join-Path $env:TEMP 'diary-android-build'
 $release = '../releases'
 $platform = (Get-ChildItem (Join-Path $Sdk 'platforms') -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'android.jar') } | Select-Object -First 1).FullName
 $tools = (Get-ChildItem (Join-Path $Sdk 'build-tools') -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'aapt2.exe') } | Select-Object -First 1).FullName

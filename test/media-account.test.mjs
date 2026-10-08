@@ -40,25 +40,25 @@ test('multi-user accounts: create, unique usernames, sign in and change password
   const { config, cleanup } = await tmp();
   try {
     assert.equal(config.hasAnyUser, false);
-    const alice = await createLocalAccount(config, { username: 'alice', passcode: 'secret1', displayName: 'Alice' });
+    const alice = await createLocalAccount(config, { username: 'alice', passcode: 'secret01', displayName: 'Alice' });
     assert.equal(alice.displayName, 'Alice');
     assert.equal(alice.googleId, null);
     // Usernames are unique and case-insensitive.
-    await assert.rejects(() => createLocalAccount(config, { username: 'ALICE', passcode: 'secret2' }), /已被占用/);
-    const bob = await createLocalAccount(config, { username: 'bob', passcode: 'secret3' });
+    await assert.rejects(() => createLocalAccount(config, { username: 'ALICE', passcode: 'secret02' }), /已被占用/);
+    const bob = await createLocalAccount(config, { username: 'bob', passcode: 'secret03' });
     assert.notEqual(alice.id, bob.id);
     // Each account verifies only against its own password.
-    assert.equal(await verifyUserPassword(config, alice.id, 'secret1'), true);
-    assert.equal(await verifyUserPassword(config, alice.id, 'secret3'), false);
+    assert.equal(await verifyUserPassword(config, alice.id, 'secret01'), true);
+    assert.equal(await verifyUserPassword(config, alice.id, 'secret03'), false);
     // Sign in by username resolves the right account and sets the session.
-    const signed = await signIn(config, 'ALICE', 'secret1', true);
+    const signed = await signIn(config, 'ALICE', 'secret01', true);
     assert.equal(signed.id, alice.id);
     assert.equal(config.session.userId, alice.id);
     assert.equal(config.session.remember, true);
     // Change password invalidates the old one.
-    await changeUserPassword(config, alice.id, 'secret1', 'newpass', 'newpass');
-    assert.equal(await verifyUserPassword(config, alice.id, 'secret1'), false);
-    assert.equal(await verifyUserPassword(config, alice.id, 'newpass'), true);
+    await changeUserPassword(config, alice.id, 'secret01', 'newpass8', 'newpass8');
+    assert.equal(await verifyUserPassword(config, alice.id, 'secret01'), false);
+    assert.equal(await verifyUserPassword(config, alice.id, 'newpass8'), true);
   } finally { cleanup(); }
 });
 

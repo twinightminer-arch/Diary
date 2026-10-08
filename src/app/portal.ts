@@ -526,7 +526,7 @@ function renderChat(prefill = ''): HTMLElement {
   wrap.append(frag(`
     <div class="view-heading">
       <div><div class="eyebrow">◇ 校园事务问答</div><h1>问我任何校园问题</h1><p>我会优先查找学校官方资料，并标注来源与核验时间。</p></div>
-      <div class="heading-actions"><button class="outline-button" id="chatExport">导出对话</button><button class="solid-button" id="chatNew">＋ 新对话</button></div>
+      <div class="heading-actions"><button class="outline-button chat-import-shortcut" id="chatImport">导入文件</button><button class="outline-button" id="chatExport">导出对话</button><button class="solid-button" id="chatNew">＋ 新对话</button></div>
     </div>
     <div class="chat-layout">
       <div class="chat-column">
@@ -564,6 +564,8 @@ function renderChat(prefill = ''): HTMLElement {
   };
   const newButton = wrap.querySelector<HTMLButtonElement>('#chatNew');
   if (newButton) newButton.onclick = () => { chatLog.length = 0; persistDocumentChat(); paintChat(); toast('已开始新对话'); };
+  const importButton = wrap.querySelector<HTMLButtonElement>('#chatImport');
+  if (importButton) importButton.onclick = () => { void importSchoolSource().catch(error => toast(failureMessage(error))); };
 
   wrap.querySelector<HTMLButtonElement>('#schoolImport')!.onclick=()=>{void importSchoolSource().catch(error=>toast(failureMessage(error)));};
   wrap.querySelector<HTMLInputElement>('#schoolSourceSearch')!.oninput=paintSourceLibrary;
