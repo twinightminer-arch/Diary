@@ -671,7 +671,11 @@ else {
         case 'web:date': return agent.api.web({ kind: 'date', locale: typeof locale === 'string' ? locale : 'zh-CN' });
         case 'web:weather': return agent.api.web({ kind: 'weather', lat: Number(lat), lon: Number(lon) });
         case 'web:geocode': return agent.api.web({ kind: 'geocode', lat: Number(lat), lon: Number(lon) });
-        case 'web:search': return agent.api.web({ kind: 'search', query: typeof query === 'string' ? query : '' });
+        case 'web:search': {
+          // 竞赛中心靠它后台查询报名官网链接；联网权限关闭时一律不发起请求。
+          if (!config.permissions.network) throw new Error('联网已关闭：请在「设置 → 联网与定位」打开联网后再试。');
+          return agent.api.web({ kind: 'search', query: typeof query === 'string' ? query : '' });
+        }
         // One aggregate call for the home-page weather panel: resolves the
         // position (only with permission), then fetches sky + air together.
         case 'weather:now': {

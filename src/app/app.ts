@@ -4,7 +4,7 @@ import type { Entry, EntrySummary, MarkdownDocument } from './api.ts';
 import { locale, t } from './copy.ts';
 import { decryptContent, isEncrypted } from '../security/encryption.ts';
 import { parseMarkdown } from '../storage/markdown.ts';
-import { mountPortal, setPortalIdentity, setPortalNavigator, setPortalPlugins } from './portal.ts';
+import { mountPortal, prefetchCompetitionSites, setPortalIdentity, setPortalNavigator, setPortalNetwork, setPortalPlugins } from './portal.ts';
 import type { PortalViewName } from './portal.ts';
 import { weatherMetrics, weatherToMarkdown } from './weather.ts';
 import type { WeatherOk, WeatherReport } from './weather.ts';
@@ -646,6 +646,8 @@ async function loadConfig() {
   renderBackgroundLibrary(backgroundLibrary, background);
   renderPermissionState(cfg);
   applyPluginVisibility(cfg);
+  // 竞赛中心的报名官网链接先在后台查好并缓存，用户点开时即可瞬间显示。
+  if (cfg.permissions.network) void prefetchCompetitionSites();
   await renderGallery();
 }
 
@@ -1634,6 +1636,8 @@ function renderPermissionState(cfg: Snapshot): void {
   $('locState').textContent = !cfg.permissions.network
     ? '联网已关闭：天气、AI 问答与 AI 搜索都不会发起任何请求。'
     : cfg.permissions.location ? `天气位置将使用：${where}` : '未开启定位：请手动填写经纬度后再打开天气。';
+  // 让竞赛中心模块同步真实的联网权限，避免联网关闭时仍去查询官网。
+  setPortalNetwork(cfg.permissions.network);
 }
 $('permNetwork').onchange = action(async () => {
   const network = ($('permNetwork') as HTMLInputElement).checked;

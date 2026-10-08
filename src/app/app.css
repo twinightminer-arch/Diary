@@ -300,6 +300,12 @@ body.has-bg .view-heading,body.has-bg .section-head,body.has-bg .result-meta,bod
 .competition-detail-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:11px;margin-bottom:12px}
 .competition-detail-grid span{display:block;font-size:calc(10px * var(--chrome-font-scale,1));color:var(--muted)}
 .competition-detail-grid strong{font-size:calc(11.5px * var(--chrome-font-scale,1))}
+.site-link{display:inline-flex;align-items:center;gap:7px;border:1px solid #c9d4ff;border-radius:8px;padding:8px 13px;font:inherit;font-size:calc(11.5px * var(--chrome-font-scale,1));font-weight:600;color:#3450d6;background:linear-gradient(180deg,#f2f5ff,#e7ecff);cursor:pointer}
+.site-link b{font-weight:600;color:#3450d6;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.site-link i{font-style:normal;font-size:calc(12px * var(--chrome-font-scale,1));opacity:.75}
+.site-link:hover{background:linear-gradient(180deg,#e7ecff,#dbe3ff);border-color:#9fb0f5}
+.site-pending{font-size:calc(11px * var(--chrome-font-scale,1));color:var(--muted);border:1px dashed var(--line);border-radius:8px;padding:8px 13px}
+.site-pending[onclick]{cursor:pointer}
 .guide-toolbar{display:flex;gap:11px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
 .search-box{display:flex;align-items:center;gap:8px;flex:1;min-width:240px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:0 13px}
 .search-box span{color:var(--muted)}

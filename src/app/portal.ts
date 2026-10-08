@@ -4,6 +4,8 @@
 // competition centre and the 办事指南 catalogue (6 categories -> 24 affairs ->
 // generated application form + material checklist + department route tracking).
 import { call } from './api.ts';
+import { extractSiteUrl, readSiteCache, siteHost, siteIsFresh, writeSiteCache } from './competition-site.ts';
+import type { CompetitionSite } from './competition-site.ts';
 import { advanceCampusCase, answerFromGuide, applicationText, createCampusCase, guideCategories, searchGuide } from './campus.ts';
 import type { CampusCase, CampusProfile, CampusService, GuideCategory } from './campus.ts';
 import { weatherMetrics, weatherToMarkdown } from './weather.ts';
@@ -679,6 +681,92 @@ function competitionMatches(item: Competition): boolean {
   if (competitionStatus !== '全部' && item.status !== competitionStatus) return false;
   return true;
 }
+// ---- 报名官网直达：后台联网查询 + 本地缓存 -------------------------
+// 纯逻辑（链接校验、从模型回答抽取链接、缓存读写）在 competition-site.ts。
+// 这里负责：进入竞赛中心 / 应用启动时后台把官网链接查好并缓存，链接点击后用
+// 系统浏览器直接打开，用户无需任何手动查询。
+const SITE_RETRY_COOLDOWN = 60_000;
+let competitionSites: Record<string, CompetitionSite> = readSiteCache();
+let siteFetch: Promise<void> | null = null;
+let siteCooldownUntil = 0;
+/** 由 app.ts 在读到配置后同步真实联网权限，避免越权发起请求。 */
+let networkAllowed = true;
+
+function siteEntry(name: string): CompetitionSite | null {
+  const hit = competitionSites[name];
+  return hit && hit.url ? hit : null;
+}
+function siteReady(name: string): boolean {
+  const hit = siteEntry(name);
+  return !!hit && siteIsFresh(hit);
+}
+/** 该显示什么：已缓存 → 直接给可点击链接；否则给当前状态文案。 */
+function competitionSiteNode(item: Competition): HTMLElement {
+  const site = siteEntry(item.name);
+  if (site) {
+    const button = h('button', 'site-link');
+    button.type = 'button';
+    button.title = '打开报名官网：' + site.url;
+    button.append(h('span', '', '报名官网'), h('b', '', siteHost(site.url)), h('i', '', '↗'));
+    button.onclick = () => { void openCompetitionSite(site.url); };
+    return button;
+  }
+  const pending = h('span', 'site-pending');
+  pending.textContent = networkAllowed ? '正在联网查询报名官网…' : '开启联网并配置 AI 后自动显示报名官网';
+  if (networkAllowed) {
+    pending.title = '点击立即重试';
+    pending.onclick = () => { siteCooldownUntil = 0; void prefetchCompetitionSites(); };
+  }
+  return pending;
+}
+async function openCompetitionSite(url: string): Promise<void> {
+  try {
+    await call({ op: 'openExternal', url });
+    toast('已在浏览器打开报名官网');
+  } catch {
+    window.open(url, '_blank', 'noopener');
+  }
+}
+function sitePrompt(item: Competition): string {
+  return '请联网检索「' + item.name + '」的官方报名网站（主办方官网或官方报名平台）。'
+    + '只返回一个以 https:// 开头的官方网站首页链接，不要任何其它文字或说明；'
+    + '若无法确定官方网站，只返回：无。';
+}
+async function fetchCompetitionSite(item: Competition): Promise<boolean> {
+  const answer = await call<string>({ op: 'web:search', query: sitePrompt(item) });
+  const url = extractSiteUrl(typeof answer === 'string' ? answer : '');
+  if (!url) return false;
+  competitionSites = { ...competitionSites, [item.name]: { url, updatedAt: Date.now() } };
+  return true;
+}
+/**
+ * 后台把（缺失或已过期的）竞赛官网链接一次性查回来。幂等：同一时刻只跑一个任务。
+ * 应用启动（app.ts）与进入竞赛中心（renderCompetition）都会调用，因此用户真正点开
+ * 「竞赛中心」时链接通常已经就位，无需等待。
+ */
+export async function prefetchCompetitionSites(): Promise<void> {
+  if (!networkAllowed || siteFetch || Date.now() < siteCooldownUntil) return;
+  const targets = competitions.filter(item => !siteReady(item.name));
+  if (!targets.length) return;
+  siteFetch = (async () => {
+    let changed = false;
+    for (const item of targets) {
+      try {
+        if (await fetchCompetitionSite(item)) changed = true;
+      } catch {
+        // 多半是未配置 AI Key 或联网被关：退避一段时间，别让每次渲染都重试。
+        siteCooldownUntil = Date.now() + SITE_RETRY_COOLDOWN;
+        break;
+      }
+      if (changed && currentView === 'competition') paintCompetitions();
+    }
+    if (changed) writeSiteCache(competitionSites);
+  })().finally(() => { siteFetch = null; });
+  return siteFetch;
+}
+/** app.ts 读到配置后同步真实联网权限。 */
+export function setPortalNetwork(on: boolean): void { networkAllowed = on; }
+
 function competitionCard(item: Competition, marks: string[]): HTMLElement {
   const card = h('article', 'competition-card');
   const initial = item.name.slice(0, 1);
@@ -710,18 +798,14 @@ function competitionCard(item: Competition, marks: string[]): HTMLElement {
     toast(next.includes(item.name) ? `已记录到本地日程：${item.name}` : `已从本地日程移除：${item.name}`);
     paintCompetitions();
   };
-  actions.append(status, detail, calendar);
+  actions.append(status, detail, calendar, competitionSiteNode(item));
   card.append(actions);
 
   if (expandedCompetition === item.name) {
     const body = h('div', 'competition-detail');
     body.append(frag(`<p>${esc(item.summary)}</p><div class="competition-detail-grid"><div><span>报名状态</span><strong>${esc(item.status)}</strong></div><div><span>主办 / 来源</span><strong>${esc(item.source)}</strong></div><div><span>适合方向</span><strong>${esc(item.track)}</strong></div></div>`));
-    const copy = h('button', 'ghost-button', '复制报名要点');
-    copy.onclick = () => {
-      const text = `${item.name}\n类型：${item.type}\n报名截止：${item.deadline}\n参赛形式：${item.mode}\n方向技能：${item.skill}\n来源：${item.source}`;
-      void navigator.clipboard.writeText(text).then(() => toast('报名要点已复制')).catch(() => toast('复制失败'));
-    };
-    body.append(copy);
+    // 「复制报名要点」已下线：每个竞赛的报名官网链接改为常驻在卡片操作区
+    // （见 competitionSiteNode），由后台联网查询得到，点击即用浏览器直达。
     card.append(body);
   }
   return card;
@@ -781,7 +865,7 @@ function renderCompetition(): HTMLElement {
     competitionQuery = ''; competitionTrack = '全部'; competitionStatus = '全部'; expandedCompetition = '';
     mountPortal('competition');
   };
-  onMount(paintCompetitions);
+  onMount(() => { paintCompetitions(); void prefetchCompetitionSites(); });
   return wrap;
 }
 

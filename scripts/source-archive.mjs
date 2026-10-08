@@ -21,7 +21,7 @@ async function files(directory) {
 }
 export async function sourceArchive() {
   const paths = ['package.json', 'package-lock.json', 'tsconfig.json', 'electron-builder.yml', 'README.md', 'LICENSE.md', 'UPSTREAM.md'];
-  for (const directory of ['src', 'scripts', 'test', 'assets', 'android']) paths.push(...await files(directory));
+  for (const directory of ['src', 'scripts', 'test', 'assets', 'android', 'resources']) paths.push(...await files(directory));
   const chunks = [], directory = []; let offset = 0, directorySize = 0;
   for (const path of paths.sort()) {
     const name = Buffer.from('Diary-source/' + path.replaceAll('\\', '/'));
